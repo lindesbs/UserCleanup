@@ -56,23 +56,41 @@ chmod +x build.sh
 
 ## Usage
 
+UserCleanup never deletes anything. It creates backups and prints the shell
+commands to remove a user; you review them and run them yourself.
+
 ```bash
-# List all users
+# List all users (with -s also system users) and the files in /etc that mention them
 ./UserCleanup list
 
-# Backup a user's files
-./UserCleanup backup [username]
+# Back up a user (run as root). Writes <user>-<time>.tar.gz with owners and
+# permissions preserved, a .manifest.json (incl. passwd/shadow/group entries)
+# and a .sha256 file into /var/backups/usercleanup (mode 0700).
+./UserCleanup backup <username>
+./UserCleanup backup <username> --dry-run   # only show what would be saved
 
-# Delete a user and their files
-./UserCleanup delete [username]
+# Print the commands to remove a user. Requires a backup (the newest one is
+# used unless --backup is given). System and service users are refused.
+./UserCleanup plan <username>
+./UserCleanup plan <username> -o remove-<username>.sh   # write to a file
+sh remove-<username>.sh                                 # after reviewing it
 
-# Show help
-./UserCleanup --help
+# Restore a backup
+tar -xzpf /var/backups/usercleanup/<user>-<time>.tar.gz -C /
 
-# Additional flags
---dry-run, -d    # Show what would be done without actually doing it
---system-users, -s  # Include system users (UID < 1000)
+# Global flags
+--backup-dir, -b    # Absolute backup directory (default /var/backups/usercleanup),
+                    # must not be inside a user's home
+--system-users, -s  # Include system users (UID < 1000) in list
 ```
+
+The generated commands verify the backup checksum, stop the user's
+processes, remove the crontab, call `userdel` and remove the home directory
+only if it is exactly `/home/<user>` and not shared with another user.
+Configuration files found in /etc are listed commented out, because the
+text search can also match files shared with other sites; check and edit
+them by hand, then run the listed config tests (apache2ctl, nginx, caddy,
+php-fpm) before reloading any service.
 
 ## Testing on Debian
 
