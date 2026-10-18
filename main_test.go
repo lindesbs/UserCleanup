@@ -33,12 +33,12 @@ func setupFS(t *testing.T) string {
 
 	write(t, passwdFile, "root:x:0:0:root:/root:/bin/bash\n"+
 		"www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin\n"+
-		"web:x:1000:1000::"+filepath.Join(homeDir, "web")+":/usr/sbin/nologin\n"+
-		"webmaster:x:1001:1001::"+filepath.Join(homeDir, "webmaster")+":/bin/bash\n"+
-		"shared:x:1002:1002::"+filepath.Join(homeDir, "web")+":/bin/bash\n"+
+		"web:x:61000:61000::"+filepath.Join(homeDir, "web")+":/usr/sbin/nologin\n"+
+		"webmaster:x:61001:61001::"+filepath.Join(homeDir, "webmaster")+":/bin/bash\n"+
+		"shared:x:61002:61002::"+filepath.Join(homeDir, "web")+":/bin/bash\n"+
 		"nobody:x:65534:65534::/nonexistent:/usr/sbin/nologin\n")
 	write(t, filepath.Join(etcDir, "shadow"), "web:$6$secret:19000::::::\n")
-	write(t, filepath.Join(etcDir, "group"), "web:x:1000:\nwww-data:x:33:web\n")
+	write(t, filepath.Join(etcDir, "group"), "web:x:61000:\nwww-data:x:33:web\n")
 	return root
 }
 

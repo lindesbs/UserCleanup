@@ -253,6 +253,7 @@ It shows users with their Apache, nginx and Caddy sites, PHP-FPM pools and
 logrotate entries, finds orphaned entries, creates backups, and generates
 the shell commands to remove a user. It never deletes anything itself: the
 administrator reviews and runs the generated commands.`,
+		Version: version,
 	}
 
 	var listCmd = &cobra.Command{

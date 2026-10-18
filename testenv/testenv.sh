@@ -212,7 +212,7 @@ setup_php() {
 	log "Lege PHP-FPM-Pools fuer PHP $ver an"
 	local pooldir=/etc/php/$ver/fpm/pool.d u
 	for u in alice bob frank web gina; do
-		put_file $pooldir/${PREFIX}$u.conf <<-EOF
+		put_file "$pooldir"/${PREFIX}$u.conf <<-EOF
 		; $MARKER
 		[${PREFIX}$u]
 		user = ${PREFIX}$u
@@ -230,7 +230,7 @@ setup_php() {
 	if [ "$BROKEN_POOL" = 1 ]; then
 		# Pool fuer einen geloeschten Nutzer: php-fpm startet damit NICHT mehr.
 		warn "lege defekten Pool fuer nicht existierenden Nutzer ${PREFIX}erin an"
-		put_file $pooldir/${PREFIX}erin.conf <<-EOF
+		put_file "$pooldir"/${PREFIX}erin.conf <<-EOF
 		; $MARKER - Nutzer existiert nicht (Problemfall)
 		[${PREFIX}erin]
 		user = ${PREFIX}erin
@@ -573,9 +573,8 @@ cmd_setup() {
 
 # beendet alle Prozesse eines Nutzers (z. B. PHP-FPM-Worker), notfalls mit KILL
 stop_user_processes() {
-	local i
 	pkill -u "$1" 2>/dev/null || return 0
-	for i in 1 2 3 4 5; do
+	for _ in 1 2 3 4 5; do
 		pgrep -u "$1" >/dev/null || return 0
 		sleep 1
 	done
@@ -659,7 +658,7 @@ cmd_status() {
 	cat <<-EOF
 	  ${PREFIX}carol      passwd-Eintrag ohne Home
 	  ${PREFIX}dave       verwaistes Home + deaktivierter Apache-vhost
-	  ${PREFIX}erin       Nutzer fehlt, aber Apache-vhost, Caddy-Site, logrotate$( [ -f /etc/php/*/fpm/pool.d/${PREFIX}erin.conf ] 2>/dev/null && echo ", PHP-Pool" )
+	  ${PREFIX}erin       Nutzer fehlt, aber Apache-vhost, Caddy-Site, logrotate$(compgen -G "/etc/php/*/fpm/pool.d/${PREFIX}erin.conf" >/dev/null && echo ", PHP-Pool")
 	  ${PREFIX}frank      nologin-Shell, aber aktive Seite
 	  ${PREFIX}gina       Home liegt in /var/www (userdel -r waere gefaehrlich)
 	  ${PREFIX}web/-webadmin  Teilstring-Falle bei Namen und Pfaden
