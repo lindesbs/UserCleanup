@@ -93,6 +93,9 @@ func backupSources(user *User) []string {
 	for _, config := range user.Configs {
 		add(config)
 	}
+	for _, dir := range user.Extra {
+		add(dir)
+	}
 	add(filepath.Join(cronDir, user.Username))
 	add(filepath.Join(mailDir, user.Username))
 	return sources

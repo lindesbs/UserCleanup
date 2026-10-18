@@ -20,6 +20,8 @@ type User struct {
 	HasLogin     bool     `json:"has_login"`
 	Configs      []string `json:"configs"`
 	IsSystemUser bool     `json:"system_user"`
+	// Extra are directories outside the home to include in the backup
+	Extra []string `json:"-"`
 }
 
 // protectedUsers can never be the target of generated delete commands,

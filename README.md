@@ -96,12 +96,21 @@ tar -xzpf /var/backups/usercleanup/<user>-<time>.tar.gz -C /
 | nginx | `/etc/nginx/sites-available`, `sites-enabled`, `conf.d` | `root` in the home, `fastcgi_pass` to the user's pool |
 | Caddy | `/etc/caddy/Caddyfile` and its imports | `root` in the home, `php_fastcgi` to the user's pool |
 | PHP-FPM | `/etc/php/*/fpm/pool.d`, `/etc/php-fpm.d` | `user =` of the pool |
-| logrotate | `/etc/logrotate.conf`, `/etc/logrotate.d` | `su`/`create` user, log path in the home |
+| logrotate | `/etc/logrotate.conf`, `/etc/logrotate.d` | `su`/`create` user, log directory in the home or owned by the user |
+| systemd | `/etc/systemd/system/*.service` | `User=` |
+
+A site belongs to the user of its PHP-FPM pool only if neither a suexec
+user nor the owner of the document root identifies it; a pool used by sites
+of other users is reported and never removed with its owner. Directories
+outside the home that the user owns (webroots below /var/www, log
+directories) are backed up and removed with the user. Sites that cannot be
+assigned to anyone are listed separately.
 
 Orphaned or broken entries: directories in /home without a user, pools
-running as a missing user or with a missing `chdir`, sites with a missing
-document root, user or PHP-FPM socket, logrotate entries with a missing
-user or log directory.
+running as a missing user or with a missing `chdir`, pools shared between
+users, sites with a missing document root, user or PHP-FPM socket, sites
+and logrotate entries in an orphaned home, logrotate entries with a missing
+user or log directory, systemd units of missing users.
 
 ### The generated commands
 
@@ -113,9 +122,10 @@ user or log directory.
    listed with their line numbers to edit by hand; the test and reload for
    that service are then commented out too.
 3. Other files in /etc that mention the user (text search), commented out.
-4. Stop the user's processes, remove the crontab, `userdel`, and remove the
-   home directory only if it is exactly `/home/<user>` and not shared with
-   another user.
+4. Stop and remove the user's systemd units, stop the user's processes,
+   remove the crontab, `userdel`, remove the home directory only if it is
+   exactly `/home/<user>` and not shared with another user, and remove the
+   directories outside the home owned by the user.
 
 ## Testing on Debian
 

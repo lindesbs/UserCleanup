@@ -21,6 +21,8 @@ type Pool struct {
 	Chdir    string            `json:"chdir,omitempty"`
 	Settings map[string]string `json:"settings,omitempty"` // php_value / php_admin_value / env
 	Owners   []string          `json:"owners,omitempty"`
+	// UsedBy lists sites of other users that send PHP requests to this pool
+	UsedBy []string `json:"used_by,omitempty"`
 }
 
 // LogrotateEntry is one block of a logrotate config

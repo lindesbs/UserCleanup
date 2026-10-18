@@ -16,6 +16,7 @@ type Inventory struct {
 	Sites     []*Site           `json:"sites"`
 	Pools     []*Pool           `json:"pools"`
 	Logrotate []*LogrotateEntry `json:"logrotate"`
+	Units     []*Unit           `json:"units"`
 	Findings  []Finding         `json:"findings"`
 	// fileOwners maps each parsed config file to the owners of its blocks;
 	// "" stands for a block without a known owner
@@ -35,6 +36,10 @@ type UserData struct {
 	Sites     []*Site           `json:"sites"`
 	Pools     []*Pool           `json:"pools"`
 	Logrotate []*LogrotateEntry `json:"logrotate"`
+	Units     []*Unit           `json:"units"`
+	// Dirs are directories outside the home that are owned by the user,
+	// such as webroots below /var/www or log directories
+	Dirs []string `json:"dirs"`
 }
 
 // isUnder reports whether path is dir or below it. "/" and empty
@@ -77,6 +82,7 @@ func collectInventory(all map[string]*User) *Inventory {
 		Sites:      collectSites(),
 		Pools:      collectPools(),
 		Logrotate:  collectLogrotate(),
+		Units:      collectUnits(),
 		fileOwners: make(map[string]map[string]bool),
 	}
 	inv.assignOwners()
@@ -94,6 +100,36 @@ func (inv *Inventory) ownersByHome(path string) []string {
 		}
 	}
 	return owners
+}
+
+// ownerByUID returns the deletable user owning path, or ""
+func (inv *Inventory) ownerByUID(path string) string {
+	uid, ok := fileUID(path)
+	if !ok {
+		return ""
+	}
+	for _, user := range inv.All {
+		if user.UID == int(uid) && isProtected(user) == "" {
+			return user.Username
+		}
+	}
+	return ""
+}
+
+// fileUID returns the owner of path
+func fileUID(path string) (uint32, bool) {
+	if path == "" {
+		return 0, false
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, false
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return 0, false
+	}
+	return st.Uid, true
 }
 
 func (inv *Inventory) addOwner(owners []string, name string) []string {
@@ -117,9 +153,11 @@ func (inv *Inventory) noteFile(file string, owners []string) {
 	}
 }
 
-// assignOwners decides which users a pool, site or logrotate entry belongs to:
-// pools by their user, sites by suexec user, document root in a home or a
-// backend pool, logrotate entries by su/create user or log path in a home.
+// assignOwners decides which users a pool, site, logrotate entry or unit
+// belongs to: pools and units by their user; sites by suexec user, document
+// root in a home or owned by the user, and only if none of these applies by
+// the user of the PHP-FPM pool they use; logrotate entries by su/create user
+// or log directory in a home or owned by the user.
 func (inv *Inventory) assignOwners() {
 	poolsByEndpoint := make(map[string][]*Pool)
 	for _, pool := range inv.Pools {
@@ -136,9 +174,12 @@ func (inv *Inventory) assignOwners() {
 		for _, owner := range inv.ownersByHome(site.Root) {
 			owners = appendUnique(owners, owner)
 		}
-		for _, backend := range site.Backends {
-			for _, pool := range poolsByEndpoint[normalizeEndpoint(backend)] {
-				owners = inv.addOwner(owners, pool.User)
+		owners = inv.addOwner(owners, inv.ownerByUID(site.Root))
+		if len(owners) == 0 {
+			for _, backend := range site.Backends {
+				for _, pool := range poolsByEndpoint[normalizeEndpoint(backend)] {
+					owners = inv.addOwner(owners, pool.User)
+				}
 			}
 		}
 		sort.Strings(owners)
@@ -150,6 +191,21 @@ func (inv *Inventory) assignOwners() {
 		}
 	}
 
+	// A pool used by a site of another user must not be removed with its owner
+	for _, site := range inv.Sites {
+		for _, backend := range site.Backends {
+			for _, pool := range poolsByEndpoint[normalizeEndpoint(backend)] {
+				if len(site.Owners) > 0 && !overlaps(site.Owners, pool.Owners) {
+					pool.UsedBy = appendUnique(pool.UsedBy, siteLabel(site)+" ("+strings.Join(site.Owners, ", ")+")")
+				}
+			}
+		}
+	}
+
+	for _, unit := range inv.Units {
+		unit.Owners = inv.addOwner(nil, unit.User)
+	}
+
 	for _, entry := range inv.Logrotate {
 		owners := inv.addOwner(nil, entry.Su)
 		owners = inv.addOwner(owners, entry.CreateOwner)
@@ -157,6 +213,7 @@ func (inv *Inventory) assignOwners() {
 			for _, owner := range inv.ownersByHome(path) {
 				owners = appendUnique(owners, owner)
 			}
+			owners = inv.addOwner(owners, inv.ownerByUID(filepath.Dir(path)))
 		}
 		sort.Strings(owners)
 		entry.Owners = owners
@@ -182,7 +239,113 @@ func (inv *Inventory) For(username string) UserData {
 			data.Logrotate = append(data.Logrotate, entry)
 		}
 	}
+	for _, unit := range inv.Units {
+		if contains(unit.Owners, username) {
+			data.Units = append(data.Units, unit)
+		}
+	}
+	data.Dirs = inv.ownedDirs(username, data)
 	return data
+}
+
+// ownedDirs returns directories outside the home that belong to the user:
+// webroots, log directories and pool chdirs owned by the user's UID, widened
+// to the topmost parent with the same owner (e.g. /var/www/site for
+// /var/www/site/htdocs). Directories that contain a home or a site of
+// another user are left out.
+func (inv *Inventory) ownedDirs(username string, data UserData) []string {
+	user := inv.All[username]
+	if user == nil || isProtected(user) != "" {
+		return nil
+	}
+	var candidates []string
+	for _, site := range data.Sites {
+		candidates = append(candidates, site.Root)
+	}
+	for _, entry := range data.Logrotate {
+		for _, path := range entry.Paths {
+			dir := filepath.Dir(path)
+			if !strings.ContainsAny(dir, "*?[") {
+				candidates = append(candidates, dir)
+			}
+		}
+	}
+	for _, pool := range data.Pools {
+		candidates = append(candidates, pool.Chdir)
+	}
+
+	var dirs []string
+	for _, dir := range candidates {
+		if uid, ok := fileUID(dir); !ok || int(uid) != user.UID || isUnder(dir, user.HomeDir) {
+			continue
+		}
+		dir = filepath.Clean(dir)
+		for parent := filepath.Dir(dir); parent != "/"; parent = filepath.Dir(parent) {
+			if uid, ok := fileUID(parent); !ok || int(uid) != user.UID {
+				break
+			}
+			dir = parent
+		}
+		if inv.sharedDir(dir, username) {
+			continue
+		}
+		dirs = appendUnique(dirs, dir)
+	}
+
+	sort.Strings(dirs)
+	var result []string
+	for _, dir := range dirs {
+		if len(result) == 0 || !isUnder(dir, result[len(result)-1]) {
+			result = append(result, dir)
+		}
+	}
+	return result
+}
+
+// sharedDir reports whether dir holds a home or site of another user
+func (inv *Inventory) sharedDir(dir, username string) bool {
+	if dir == "/" || isUnder(homeDir, dir) {
+		return true
+	}
+	for _, other := range inv.All {
+		if other.Username != username && isUnder(other.HomeDir, dir) {
+			return true
+		}
+	}
+	for _, site := range inv.Sites {
+		if isUnder(site.Root, dir) && !(len(site.Owners) == 1 && site.Owners[0] == username) {
+			return true
+		}
+	}
+	return false
+}
+
+// UnownedSites returns the sites no user could be assigned to
+func (inv *Inventory) UnownedSites() []*Site {
+	var sites []*Site
+	for _, site := range inv.Sites {
+		if len(site.Owners) == 0 {
+			sites = append(sites, site)
+		}
+	}
+	return sites
+}
+
+// siteLabel names a site for messages
+func siteLabel(site *Site) string {
+	if len(site.Names) > 0 {
+		return site.Server + " " + site.Names[0]
+	}
+	return site.Server + " " + site.File
+}
+
+func overlaps(a, b []string) bool {
+	for _, v := range a {
+		if contains(b, v) {
+			return true
+		}
+	}
+	return false
 }
 
 // Files returns all config files (and enabled links) with something of the user
@@ -199,6 +362,9 @@ func (d UserData) Files() []string {
 	}
 	for _, entry := range d.Logrotate {
 		files = appendUnique(files, entry.File)
+	}
+	for _, unit := range d.Units {
+		files = appendUnique(files, unit.File)
 	}
 	sort.Strings(files)
 	return files
@@ -237,6 +403,7 @@ func (inv *Inventory) findOrphans() {
 		homes[filepath.Clean(user.HomeDir)] = true
 	}
 
+	var orphanHomes []string
 	entries, _ := os.ReadDir(homeDir)
 	for _, entry := range entries {
 		path := filepath.Join(homeDir, entry.Name())
@@ -250,6 +417,15 @@ func (inv *Inventory) findOrphans() {
 			}
 		}
 		add("orphan_home", path, 0, "%s", detail)
+		orphanHomes = append(orphanHomes, path)
+	}
+	inOrphanHome := func(path string) string {
+		for _, home := range orphanHomes {
+			if isUnder(path, home) {
+				return home
+			}
+		}
+		return ""
 	}
 
 	endpoints := make(map[string]bool)
@@ -263,15 +439,21 @@ func (inv *Inventory) findOrphans() {
 		if pool.Chdir != "" && !exists(pool.Chdir) {
 			add("pool_chdir_missing", pool.File, pool.Line, "PHP-FPM pool [%s] chdir %s does not exist", pool.Name, pool.Chdir)
 		}
+		for _, site := range pool.UsedBy {
+			add("pool_shared", pool.File, pool.Line, "PHP-FPM pool [%s] of %s is also used by %s", pool.Name, pool.User, site)
+		}
 	}
 
 	for _, site := range inv.Sites {
-		name := site.Server
-		if len(site.Names) > 0 {
-			name += " " + site.Names[0]
+		name := siteLabel(site)
+		state := ""
+		if !site.Enabled {
+			state = " (disabled)"
 		}
-		if site.Root != "" && !exists(site.Root) {
-			add("site_root_missing", site.File, site.Line, "%s: document root %s does not exist", name, site.Root)
+		if home := inOrphanHome(site.Root); home != "" {
+			add("site_in_orphan_home", site.File, site.Line, "%s%s: document root %s is in orphaned home %s", name, state, site.Root, home)
+		} else if site.Root != "" && !exists(site.Root) {
+			add("site_root_missing", site.File, site.Line, "%s%s: document root %s does not exist", name, state, site.Root)
 		}
 		if site.User != "" && inv.All[site.User] == nil {
 			add("site_user_missing", site.File, site.Line, "%s: runs as missing user %s", name, site.User)
@@ -285,16 +467,28 @@ func (inv *Inventory) findOrphans() {
 	}
 
 	for _, entry := range inv.Logrotate {
-		for _, name := range []string{entry.Su, entry.CreateOwner} {
+		names := []string{entry.Su}
+		if entry.CreateOwner != entry.Su {
+			names = append(names, entry.CreateOwner)
+		}
+		for _, name := range names {
 			if name != "" && inv.All[name] == nil {
 				add("logrotate_user_missing", entry.File, entry.Line, "user %s does not exist; logrotate will fail", name)
 			}
 		}
 		for _, path := range entry.Paths {
 			dir := filepath.Dir(path)
-			if matches, _ := filepath.Glob(dir); len(matches) == 0 {
+			if home := inOrphanHome(dir); home != "" {
+				add("logrotate_in_orphan_home", entry.File, entry.Line, "%s is in orphaned home %s", path, home)
+			} else if matches, _ := filepath.Glob(dir); len(matches) == 0 {
 				add("logrotate_path_missing", entry.File, entry.Line, "directory of %s does not exist", path)
 			}
+		}
+	}
+
+	for _, unit := range inv.Units {
+		if unit.User != "" && inv.All[unit.User] == nil {
+			add("unit_user_missing", unit.File, 0, "systemd unit %s runs as missing user %s", unit.Name, unit.User)
 		}
 	}
 }

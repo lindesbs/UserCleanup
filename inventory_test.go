@@ -114,8 +114,28 @@ chdir = /home/ghost/htdocs
 `)
 	write(t, filepath.Join(etcDir, "logrotate.d/ghost"), `/home/ghost/logs/*.log {
     su ghost ghost
+    create 0640 ghost ghost
 }
 `)
+
+	// webmaster's site uses the pool of web: it stays webmaster's and
+	// the pool must not be removed with web
+	write(t, filepath.Join(apache, "sites-available/master-php.conf"), `<VirtualHost *:80>
+    ServerName php.master.example.org
+    DocumentRoot `+masterHome+`/public
+    SetHandler "proxy:unix:/run/php/web.sock|fcgi://localhost"
+</VirtualHost>
+`)
+	// a disabled vhost in the orphaned home of ghost
+	write(t, filepath.Join(apache, "sites-available/ghost-home.conf"), `<VirtualHost *:80>
+    ServerName home.ghost.example.org
+    DocumentRoot `+filepath.Join(homeDir, "ghost")+`
+</VirtualHost>
+`)
+	write(t, filepath.Join(etcDir, "systemd/system/web-app.service"), "[Unit]\nDescription=x\n[Service]\nUser=web\nExecStart=/bin/true\n")
+	write(t, filepath.Join(etcDir, "systemd/system/multi-user.target.wants/web-app.service"), "")
+	write(t, filepath.Join(etcDir, "systemd/system/ghost.service"), "[Service]\nUser=ghost\n")
+	write(t, filepath.Join(etcDir, "systemd/system/plain.service"), "[Service]\nExecStart=/bin/true\n")
 }
 
 func TestParsers(t *testing.T) {
@@ -127,7 +147,7 @@ func TestParsers(t *testing.T) {
 	for _, site := range sites {
 		byName[site.Names[0]] = site
 	}
-	if len(sites) != 7 {
+	if len(sites) != 9 {
 		t.Fatalf("got %d sites: %v", len(sites), byName)
 	}
 
@@ -187,8 +207,25 @@ func TestInventoryOwnersAndFindings(t *testing.T) {
 	if strings.Join(names, ",") != want {
 		t.Errorf("sites of web = %s, want %s", strings.Join(names, ","), want)
 	}
-	if len(data.Pools) != 1 || len(data.Logrotate) != 1 {
-		t.Errorf("pools/logrotate of web = %d/%d", len(data.Pools), len(data.Logrotate))
+	if len(data.Pools) != 1 || len(data.Logrotate) != 1 || len(data.Units) != 1 || !data.Units[0].Enabled {
+		t.Errorf("pools/logrotate/units of web = %d/%d/%+v", len(data.Pools), len(data.Logrotate), data.Units)
+	}
+	if used := data.Pools[0].UsedBy; len(used) != 1 || used[0] != "apache php.master.example.org (webmaster)" {
+		t.Errorf("pool used by = %v", used)
+	}
+	var masterSites []string
+	for _, site := range inv.For("webmaster").Sites {
+		masterSites = append(masterSites, site.Names[0])
+	}
+	if !contains(masterSites, "php.master.example.org") {
+		t.Errorf("php.master.example.org must belong to webmaster, has %v", masterSites)
+	}
+	var unowned []string
+	for _, site := range inv.UnownedSites() {
+		unowned = append(unowned, site.Names[0])
+	}
+	if strings.Join(unowned, ",") != "home.ghost.example.org,old.example.org" {
+		t.Errorf("unowned sites = %v", unowned)
 	}
 
 	apache := filepath.Join(etcDir, "apache2/sites-available")
@@ -208,7 +245,8 @@ func TestInventoryOwnersAndFindings(t *testing.T) {
 	}
 	for kind, n := range map[string]int{
 		"orphan_home": 1, "pool_user_missing": 1, "pool_chdir_missing": 1, "site_root_missing": 2,
-		"logrotate_user_missing": 1, "logrotate_path_missing": 3,
+		"site_in_orphan_home": 1, "logrotate_user_missing": 1, "logrotate_path_missing": 3,
+		"pool_shared": 1, "unit_user_missing": 1,
 	} {
 		if kinds[kind] != n {
 			t.Errorf("%s findings = %d, want %d (%+v)", kind, kinds[kind], n, inv.Findings)
@@ -243,8 +281,11 @@ func TestPlanWithServices(t *testing.T) {
 		"# " + q("caddy/Caddyfile") + " lines 7-10: site caddy.web.example.org www.caddy.web.example.org",
 		"# caddy validate",
 		"# systemctl reload caddy",
-		"rm -- " + q("php/8.2/fpm/pool.d/web.conf") + "\nphp-fpm8.2 -t\nsystemctl reload php8.2-fpm\n",
-		"rm -- " + q("logrotate.d/web") + "\nlogrotate -d " + q("logrotate.conf") + " >/dev/null 2>&1 || {",
+		// the pool is also used by webmaster's site, so it stays
+		"pool [web] is also used by apache php.master.example.org (webmaster)",
+		"# php-fpm8.2 -t\n# systemctl reload php8.2-fpm\n",
+		"systemctl disable --now 'web-app.service'\nrm -- " + q("systemd/system/web-app.service") + "\nsystemctl daemon-reload\n",
+		"rm -- " + q("logrotate.d/web") + "\nlogrotate -d " + q("logrotate.conf") + " >/dev/null 2>&1 || echo",
 	} {
 		if !strings.Contains(script, want) {
 			t.Errorf("plan misses %q:\n%s", want, script)
@@ -254,7 +295,55 @@ func TestPlanWithServices(t *testing.T) {
 		strings.Index(script, "systemctl reload php8.2-fpm") > strings.Index(script, "userdel") {
 		t.Errorf("wrong order: web servers, then PHP-FPM, then userdel:\n%s", script)
 	}
-	if strings.Contains(script, "master") || strings.Contains(script, "ghost") {
+	if strings.Contains(script, "rm -- '"+filepath.Join(etcDir, "apache2/sites-available/master")) || strings.Contains(script, "ghost") {
 		t.Errorf("plan touches other users:\n%s", script)
+	}
+}
+
+func TestWebrootOwnedByUID(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("needs root to chown test directories")
+	}
+	root := setupFS(t)
+	setupServices(t)
+	www := filepath.Join(root, "var/www")
+	site := filepath.Join(www, "admin.example.org")
+	for _, dir := range []string{site + "/htdocs", filepath.Join(root, "var/log/web")} {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// webmaster (UID 1001) owns the site directory, web (1000) its log dir
+	for _, dir := range []string{site, site + "/htdocs"} {
+		if err := os.Chown(dir, 1001, 1001); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.Chown(filepath.Join(root, "var/log/web"), 1000, 1000); err != nil {
+		t.Fatal(err)
+	}
+	write(t, filepath.Join(etcDir, "apache2/sites-available/admin.conf"), `<VirtualHost *:80>
+    ServerName admin.example.org
+    DocumentRoot `+site+`/htdocs
+    SetHandler "proxy:unix:/run/php/web.sock|fcgi://localhost"
+</VirtualHost>
+`)
+	write(t, filepath.Join(etcDir, "logrotate.d/web-var"), filepath.Join(root, "var/log/web")+"/*.log {\n}\n")
+
+	users, _ := readPasswdFile(true)
+	inv := collectInventory(users)
+	master := inv.For("webmaster")
+	found := false
+	for _, s := range master.Sites {
+		found = found || s.Names[0] == "admin.example.org"
+	}
+	if !found {
+		t.Error("admin.example.org must belong to the owner of its webroot, not the pool user")
+	}
+	if strings.Join(master.Dirs, ",") != site {
+		t.Errorf("dirs of webmaster = %v, want %s (topmost dir owned by the user)", master.Dirs, site)
+	}
+	if dirs := inv.For("web").Dirs; strings.Join(dirs, ",") != filepath.Join(root, "var/log/web") {
+		t.Errorf("dirs of web = %v", dirs)
 	}
 }

@@ -208,6 +208,9 @@ func TestBackupAndPlan(t *testing.T) {
 
 func TestPlanRemovesOwnHome(t *testing.T) {
 	setupFS(t)
+	if err := os.MkdirAll(filepath.Join(homeDir, "webmaster"), 0755); err != nil {
+		t.Fatal(err)
+	}
 	users, _ := readPasswdFile(true)
 	user := users["webmaster"]
 	script, err := buildDeletePlan(user, collectInventory(users), "/var/backups/usercleanup/webmaster-20261018-090000.tar.gz", &Manifest{Username: "webmaster"})

@@ -77,6 +77,9 @@ func printUserInfo(user *User, data UserData) {
 			for _, backend := range site.Backends {
 				fmt.Printf("      php: %s\n", backend)
 			}
+			if len(site.Owners) > 1 {
+				fmt.Printf("      shared with: %s\n", strings.Join(site.Owners, ", "))
+			}
 			fmt.Printf("      file: %s\n", lines(site.File, site.Line, site.EndLine))
 		}
 	}
@@ -92,7 +95,29 @@ func printUserInfo(user *User, data UserData) {
 			for _, key := range keys {
 				fmt.Printf("      %s = %s\n", key, pool.Settings[key])
 			}
+			for _, site := range pool.UsedBy {
+				color.New(color.FgYellow).Printf("      also used by: %s\n", site)
+			}
 			fmt.Printf("      file: %s\n", lines(pool.File, pool.Line, pool.EndLine))
+		}
+	}
+	if len(data.Units) > 0 {
+		fmt.Println("systemd units:")
+		for _, unit := range data.Units {
+			state := "disabled"
+			if unit.Enabled {
+				state = "enabled"
+			}
+			fmt.Printf("  - %s (%s)\n      file: %s\n", unit.Name, state, unit.File)
+		}
+	}
+	if crontab := filepath.Join(cronDir, user.Username); exists(crontab) {
+		fmt.Printf("Crontab: %s\n", crontab)
+	}
+	if len(data.Dirs) > 0 {
+		fmt.Println("Directories outside the home:")
+		for _, dir := range data.Dirs {
+			fmt.Printf("  - %s\n", dir)
 		}
 	}
 	if len(data.Logrotate) > 0 {
@@ -118,6 +143,26 @@ func printUserInfo(user *User, data UserData) {
 		for _, config := range others {
 			fmt.Printf("  - %s\n", config)
 		}
+	}
+	fmt.Println()
+}
+
+// printUnownedSites prints sites that could not be assigned to a user
+func printUnownedSites(sites []*Site) {
+	if len(sites) == 0 {
+		return
+	}
+	color.New(color.Bold).Printf("Sites without a known owner (%d):\n", len(sites))
+	for _, site := range sites {
+		state := "enabled"
+		if !site.Enabled {
+			state = "disabled"
+		}
+		fmt.Printf("  - %s %s (%s)\n", site.Server, strings.Join(site.Names, " "), state)
+		if site.Root != "" {
+			fmt.Printf("      root: %s\n", site.Root)
+		}
+		fmt.Printf("      file: %s\n", lines(site.File, site.Line, site.EndLine))
 	}
 	fmt.Println()
 }
@@ -155,9 +200,11 @@ func loadUser(username string) (*User, *Inventory) {
 	}
 	inv := collectInventory(users)
 	// Parsed files belong into the backup even if the text search missed them
-	for _, file := range inv.For(username).Files() {
+	data := inv.For(username)
+	for _, file := range data.Files() {
 		user.Configs = appendUnique(user.Configs, file)
 	}
+	user.Extra = data.Dirs
 	sort.Strings(user.Configs)
 	return user, inv
 }
@@ -212,9 +259,10 @@ administrator reviews and runs the generated commands.`,
 					UserData
 				}
 				out := struct {
-					Users    []userJSON `json:"users"`
-					Findings []Finding  `json:"findings"`
-				}{Findings: inv.Findings}
+					Users        []userJSON `json:"users"`
+					UnownedSites []*Site    `json:"unowned_sites"`
+					Findings     []Finding  `json:"findings"`
+				}{UnownedSites: inv.UnownedSites(), Findings: inv.Findings}
 				for _, user := range sortedUsers(users) {
 					out.Users = append(out.Users, userJSON{user, inv.For(user.Username)})
 				}
@@ -231,6 +279,7 @@ administrator reviews and runs the generated commands.`,
 				printUserInfo(user, inv.For(user.Username))
 			}
 			if len(args) == 0 {
+				printUnownedSites(inv.UnownedSites())
 				printFindings(inv.Findings)
 			}
 		},
@@ -303,7 +352,7 @@ unless --backup is given. System and service users are refused.`,
 			if err := os.WriteFile(planOutput, []byte(script), 0600); err != nil {
 				fail("Error writing %s: %v", planOutput, err)
 			}
-			fmt.Printf("Commands written to %s. Review them, then run: sh %s\n", planOutput, planOutput)
+			fmt.Printf("Commands written to %s. Review them, then run: sudo sh %s\n", planOutput, planOutput)
 		},
 	}
 

@@ -41,10 +41,12 @@ func serviceFor(kind, version string) (string, *serviceChanges) {
 		return "php" + version, &serviceChanges{title: "PHP-FPM " + version,
 			test: "php-fpm" + version + " -t", reload: "systemctl reload php" + version + "-fpm"}
 	default:
+		// Only a warning: errors of other entries (e.g. an su user that is
+		// already gone) would otherwise stop the script halfway.
 		conf := shellQuote(filepath.Join(etcDir, "logrotate.conf"))
 		return "logrotate", &serviceChanges{title: "logrotate",
-			test: "logrotate -d " + conf + " >/dev/null 2>&1 || { echo \"check failed: logrotate -d " +
-				strings.ReplaceAll(conf, "'", "") + "\" >&2; exit 1; }"}
+			test: "logrotate -d " + conf + " >/dev/null 2>&1 || echo \"WARNING: logrotate reports errors, check: logrotate -d " +
+				strings.ReplaceAll(conf, "'", "") + "\" >&2"}
 	}
 }
 
@@ -55,13 +57,18 @@ func configChanges(username string, inv *Inventory) []*serviceChanges {
 	var order []string
 	done := make(map[string]bool)
 
-	add := func(kind, version, file string, line, endLine int, what string, link string) {
+	add := func(kind, version, file string, line, endLine int, what, link, keep string) {
 		key, fresh := serviceFor(kind, version)
 		svc := services[key]
 		if svc == nil {
 			svc = fresh
 			services[key] = svc
 			order = append(order, key)
+		}
+		if keep != "" {
+			svc.manual = append(svc.manual, fmt.Sprintf("# %s lines %d-%d: %s is %s; keep it or move it to that user",
+				shellQuote(file), line, endLine, what, keep))
+			return
 		}
 		if inv.dedicated(file, username) {
 			if done[file] {
@@ -80,17 +87,21 @@ func configChanges(username string, inv *Inventory) []*serviceChanges {
 
 	data := inv.For(username)
 	for _, pool := range data.Pools {
-		add("php", pool.Version, pool.File, pool.Line, pool.EndLine, "pool ["+pool.Name+"]", "")
+		keep := ""
+		if len(pool.UsedBy) > 0 {
+			keep = "also used by " + strings.Join(pool.UsedBy, ", ")
+		}
+		add("php", pool.Version, pool.File, pool.Line, pool.EndLine, "pool ["+pool.Name+"]", "", keep)
 	}
 	for _, site := range data.Sites {
 		what := "site"
 		if len(site.Names) > 0 {
 			what += " " + strings.Join(site.Names, " ")
 		}
-		add(site.Server, "", site.File, site.Line, site.EndLine, what, site.EnabledLink)
+		add(site.Server, "", site.File, site.Line, site.EndLine, what, site.EnabledLink, "")
 	}
 	for _, entry := range data.Logrotate {
-		add("logrotate", "", entry.File, entry.Line, entry.EndLine, strings.Join(entry.Paths, " "), "")
+		add("logrotate", "", entry.File, entry.Line, entry.EndLine, strings.Join(entry.Paths, " "), "", "")
 	}
 
 	sort.SliceStable(order, func(i, j int) bool {
@@ -152,6 +163,8 @@ func buildDeletePlan(user *User, inv *Inventory, archivePath string, manifest *M
 		shellQuote(strings.TrimSuffix(filepath.Base(archivePath), ".tar.gz")+".sha256"))
 	line("")
 
+	data := inv.For(user.Username)
+
 	// Configs go first: a PHP-FPM pool or vhost of a deleted user stops
 	// the whole service on its next reload.
 	for _, svc := range configChanges(user.Username, inv) {
@@ -174,7 +187,7 @@ func buildDeletePlan(user *User, inv *Inventory, archivePath string, manifest *M
 	}
 
 	known := make(map[string]bool)
-	for _, file := range inv.For(user.Username).Files() {
+	for _, file := range data.Files() {
 		known[file] = true
 	}
 	var others []string
@@ -193,6 +206,16 @@ func buildDeletePlan(user *User, inv *Inventory, archivePath string, manifest *M
 		line("")
 	}
 
+	if len(data.Units) > 0 {
+		section("Stop and remove systemd units running as %s", user.Username)
+		for _, unit := range data.Units {
+			line("systemctl disable --now %s", shellQuote(unit.Name))
+			line("rm -- %s", shellQuote(unit.File))
+		}
+		line("systemctl daemon-reload")
+		line("")
+	}
+
 	section("Stop running processes of the user")
 	line("pkill -KILL -u %s || true", u)
 	line("")
@@ -208,7 +231,9 @@ func buildDeletePlan(user *User, inv *Inventory, archivePath string, manifest *M
 	line("")
 
 	section("Remove the files of the user")
-	if ok, reason := homeIsRemovable(user, inv.All); ok {
+	if !exists(user.HomeDir) {
+		line("#    Home directory %s does not exist", user.HomeDir)
+	} else if ok, reason := homeIsRemovable(user, inv.All); ok {
 		line("rm -rf -- %s", shellQuote(filepath.Clean(user.HomeDir)))
 	} else {
 		line("#    Home directory is not removed automatically: %s", reason)
@@ -216,6 +241,12 @@ func buildDeletePlan(user *User, inv *Inventory, archivePath string, manifest *M
 	}
 	if _, err := os.Stat(filepath.Join(mailDir, user.Username)); err == nil {
 		line("rm -f -- %s", shellQuote(filepath.Join(mailDir, user.Username)))
+	}
+	if len(data.Dirs) > 0 {
+		line("#    Directories outside the home owned by %s (webroots, logs):", user.Username)
+		for _, dir := range data.Dirs {
+			line("rm -rf -- %s", shellQuote(dir))
+		}
 	}
 	line("")
 
