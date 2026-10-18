@@ -16,13 +16,13 @@ import (
 
 // User represents a user on the system
 type User struct {
-	Username    string
-	UID         int
-	GID         int
-	HomeDir     string
-	Shell       string
-	Exists      bool
-	Configs     []string
+	Username     string
+	UID          int
+	GID          int
+	HomeDir      string
+	Shell        string
+	Exists       bool
+	Configs      []string
 	IsSystemUser bool
 }
 
@@ -70,18 +70,18 @@ func readPasswdFile() (map[string]*User, error) {
 		}
 
 		user := &User{
-			Username:    parts[0],
-			UID:         uid,
-			GID:         gid,
-			HomeDir:     parts[5],
-			Shell:       parts[6],
+			Username:     parts[0],
+			UID:          uid,
+			GID:          gid,
+			HomeDir:      parts[5],
+			Shell:        parts[6],
 			IsSystemUser: isSystemUser,
 		}
 
 		// Check if user exists (has a valid login shell)
-		user.Exists = !strings.HasSuffix(user.Shell, "nologin") && 
-		              !strings.HasSuffix(user.Shell, "false") &&
-		              user.Shell != ""
+		user.Exists = !strings.HasSuffix(user.Shell, "nologin") &&
+			!strings.HasSuffix(user.Shell, "false") &&
+			user.Shell != ""
 
 		users[parts[0]] = user
 	}
@@ -133,8 +133,8 @@ func findUserConfigs(users map[string]*User) error {
 		contentStr := string(content)
 		for username, user := range users {
 			// Check if username or home directory is mentioned in the file
-			if strings.Contains(contentStr, username) || 
-			   strings.Contains(contentStr, user.HomeDir) {
+			if strings.Contains(contentStr, username) ||
+				strings.Contains(contentStr, user.HomeDir) {
 				user.Configs = append(user.Configs, path)
 			}
 		}
@@ -251,6 +251,7 @@ func main() {
 It can show which users exist, which are inactive, and what configurations
 are associated with each user. It also provides functionality to backup
 and delete users.`,
+		Version: version,
 	}
 
 	var listCmd = &cobra.Command{

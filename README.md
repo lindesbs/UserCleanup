@@ -48,6 +48,18 @@ make deps
 make help
 ```
 
+## Versioning and releases
+
+The version lives in the `VERSION` file (`MAJOR.MINOR.PATCH`) and is compiled into the binaries, so `UserCleanup --version` shows it. `make dist` builds all platforms and packs them into `dist/` with a `SHA256SUMS` file.
+
+GitHub Actions:
+
+- **CI** (`.github/workflows/ci.yml`) runs on every push and pull request: `make lint` (gofmt, go vet), `make test`, `make release` and shellcheck on the shell scripts.
+- **Version bumped** (job in the CI workflow) runs on pull requests into `main` and fails unless `VERSION` is higher than on `main` and no tag `v<VERSION>` exists yet.
+- **Release** (`.github/workflows/release.yml`) runs on every push to `main`: it builds all platforms, tags `v<VERSION>` and publishes a GitHub release with the archives.
+
+To release: raise `VERSION` on `develop`, open a pull request from `develop` into `main`, merge it once CI is green.
+
 ## Usage
 
 ```bash
