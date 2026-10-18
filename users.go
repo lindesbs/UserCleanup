@@ -22,6 +22,8 @@ type User struct {
 	IsSystemUser bool     `json:"system_user"`
 	// Extra are directories outside the home to include in the backup
 	Extra []string `json:"-"`
+	// MySQL are the logins of ~/.my.cnf whose databases are dumped
+	MySQL []*MySQLAccount `json:"-"`
 }
 
 // protectedUsers can never be the target of generated delete commands,

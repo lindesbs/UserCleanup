@@ -31,7 +31,28 @@ type Manifest struct {
 	Configs      []string            `json:"configs"`
 	AccountLines map[string][]string `json:"account_lines"`
 	Files        []ManifestFile      `json:"files"`
+	MySQL        []ManifestDump      `json:"mysql,omitempty"`
 	Skipped      []string            `json:"skipped,omitempty"`
+}
+
+// ManifestDump is a mysqldump of the databases of one MySQL login,
+// written next to the archive
+type ManifestDump struct {
+	File      string   `json:"file"`
+	Endpoint  string   `json:"endpoint"`
+	Account   string   `json:"account"`
+	Databases []string `json:"databases"`
+	SHA256    string   `json:"sha256"`
+}
+
+// HasDatabase reports whether a dump in the backup holds the database
+func (m *Manifest) HasDatabase(endpoint, name string) bool {
+	for _, dump := range m.MySQL {
+		if dump.Endpoint == endpoint && contains(dump.Databases, name) {
+			return true
+		}
+	}
+	return false
 }
 
 // ManifestFile is one entry of the archive
@@ -114,10 +135,21 @@ func backupUser(user *User, users map[string]*User, dir string) (string, error) 
 	archivePath := filepath.Join(dir, base+".tar.gz")
 	sources := backupSources(user)
 
+	dumps := mysqlDumps(user, base)
+
 	if dryRun {
 		fmt.Printf("Would write %s with:\n", archivePath)
 		for _, src := range sources {
 			fmt.Printf("  - %s\n", src)
+		}
+		for _, d := range dumps {
+			fmt.Printf("Would dump MySQL databases %s of %s to %s\n",
+				strings.Join(d.Databases, ", "), d.acct.Label(), filepath.Join(dir, d.File))
+		}
+		for _, acct := range user.MySQL {
+			if acct.Global && acct.Error == "" {
+				fmt.Printf("Not dumped: %s has privileges on all databases\n", acct.Label())
+			}
 		}
 		return archivePath, nil
 	}
@@ -185,6 +217,32 @@ func backupUser(user *User, users map[string]*User, dir string) (string, error) 
 	}
 
 	manifest.SHA256 = hex.EncodeToString(hash.Sum(nil))
+	checksum := fmt.Sprintf("%s  %s\n", manifest.SHA256, manifest.Archive)
+
+	// The databases are dropped by the generated commands, so a failed
+	// dump fails the whole backup
+	for _, d := range dumps {
+		sum, err := writeDump(d, dir)
+		if err != nil {
+			os.Remove(archivePath)
+			for _, written := range manifest.MySQL {
+				os.Remove(filepath.Join(dir, written.File))
+			}
+			return "", fmt.Errorf("mysqldump of %s (%s): %w", strings.Join(d.Databases, ", "), d.acct.Label(), err)
+		}
+		d.SHA256 = sum
+		manifest.MySQL = append(manifest.MySQL, d.ManifestDump)
+		checksum += fmt.Sprintf("%s  %s\n", sum, d.File)
+	}
+	for _, acct := range user.MySQL {
+		switch {
+		case acct.Error != "":
+			manifest.Skipped = append(manifest.Skipped, fmt.Sprintf("MySQL databases of %s (%s)", acct.Label(), acct.Error))
+		case acct.Global:
+			manifest.Skipped = append(manifest.Skipped, fmt.Sprintf("MySQL databases of %s (privileges on all databases)", acct.Label()))
+		}
+	}
+
 	data, err := json.MarshalIndent(manifest, "", "  ")
 	if err != nil {
 		return "", err
@@ -192,7 +250,6 @@ func backupUser(user *User, users map[string]*User, dir string) (string, error) 
 	if err := os.WriteFile(filepath.Join(dir, base+".manifest.json"), append(data, '\n'), 0600); err != nil {
 		return "", err
 	}
-	checksum := fmt.Sprintf("%s  %s\n", manifest.SHA256, manifest.Archive)
 	if err := os.WriteFile(filepath.Join(dir, base+".sha256"), []byte(checksum), 0600); err != nil {
 		return "", err
 	}
@@ -201,6 +258,62 @@ func backupUser(user *User, users map[string]*User, dir string) (string, error) 
 		fmt.Printf("Warning: not backed up: %s\n", skipped)
 	}
 	return archivePath, nil
+}
+
+// pendingDump is a dump still to write
+type pendingDump struct {
+	ManifestDump
+	acct *MySQLAccount
+}
+
+// mysqlDumps returns the dumps to write for the user's MySQL logins
+func mysqlDumps(user *User, base string) []*pendingDump {
+	var dumps []*pendingDump
+	for _, acct := range user.MySQL {
+		if names := acct.dumpDatabases(); len(names) > 0 {
+			dumps = append(dumps, &pendingDump{ManifestDump: ManifestDump{
+				Endpoint: acct.Endpoint(), Account: acct.Account, Databases: names}, acct: acct})
+		}
+	}
+	for i, d := range dumps {
+		d.File = base + ".mysql.sql.gz"
+		if len(dumps) > 1 {
+			d.File = fmt.Sprintf("%s.mysql-%d.sql.gz", base, i+1)
+		}
+	}
+	return dumps
+}
+
+// writeDump writes a gzipped mysqldump with mode 0600 and returns its
+// checksum
+func writeDump(d *pendingDump, dir string) (string, error) {
+	tmp, err := os.CreateTemp(dir, "."+d.File+"-*.tmp")
+	if err != nil {
+		return "", err
+	}
+	defer os.Remove(tmp.Name()) // no-op after successful rename
+
+	hash := sha256.New()
+	gz := gzip.NewWriter(io.MultiWriter(tmp, hash))
+	if err := d.acct.dump(d.Databases, gz); err != nil {
+		tmp.Close()
+		return "", err
+	}
+	if err := gz.Close(); err != nil {
+		tmp.Close()
+		return "", err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return "", err
+	}
+	if err := tmp.Close(); err != nil {
+		return "", err
+	}
+	if err := os.Rename(tmp.Name(), filepath.Join(dir, d.File)); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
 // addToArchive adds a path, recursively for directories, to the archive.

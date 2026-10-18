@@ -148,6 +148,7 @@ func printUserInfo(user *User, all UserData, f listFilter) {
 			fmt.Printf("  - %s\n", unit)
 		}
 	}
+	printMySQL(data.MySQL)
 	if len(data.Refs) > 0 {
 		fmt.Println("Entries in /etc:")
 		for _, ref := range data.Refs {
@@ -175,6 +176,43 @@ func printUserInfo(user *User, all UserData, f listFilter) {
 		}
 	}
 	fmt.Println()
+}
+
+// printMySQL prints the databases and tables of the user's MySQL logins
+func printMySQL(accounts []*MySQLAccount) {
+	if len(accounts) == 0 {
+		return
+	}
+	fmt.Println("MySQL:")
+	for _, acct := range accounts {
+		fmt.Printf("  - %s: %s", acct.File, acct.Label())
+		if acct.Server != "" {
+			fmt.Printf(" (server %s)", acct.Server)
+		}
+		fmt.Println()
+		if acct.Database != "" {
+			fmt.Printf("      default database: %s\n", acct.Database)
+		}
+		if acct.Error != "" {
+			color.New(color.FgYellow).Printf("      not checked: %s\n", acct.Error)
+			continue
+		}
+		if acct.Global {
+			color.New(color.FgYellow).Println("      account has privileges on all databases; they are not assigned to this user")
+		}
+		if len(acct.Databases) == 0 {
+			fmt.Println("      no databases")
+		}
+		for _, db := range acct.Databases {
+			fmt.Printf("      database %s: %d tables, %s, ~%d rows\n", db.Name, len(db.Tables), formatBytes(db.Size()), db.Rows())
+			if len(db.SharedWith) > 0 {
+				color.New(color.FgYellow).Printf("        also used by: %s\n", strings.Join(db.SharedWith, ", "))
+			}
+			for _, table := range db.Tables {
+				fmt.Printf("        - %s (%s, ~%d rows, %s)\n", table.Name, table.Engine, table.Rows, formatBytes(table.Size))
+			}
+		}
+	}
 }
 
 // printUnownedSites prints sites that could not be assigned to a user
@@ -235,6 +273,7 @@ func loadUser(username string) (*User, *Inventory) {
 		user.Configs = appendUnique(user.Configs, file)
 	}
 	user.Extra = data.Dirs
+	user.MySQL = data.MySQL
 	sort.Strings(user.Configs)
 	return user, inv
 }
@@ -249,8 +288,8 @@ func main() {
 		Use:   "usercleanup",
 		Short: "UserCleanup is a tool to manage and clean up user accounts",
 		Long: `UserCleanup helps system administrators identify and manage user accounts.
-It shows users with their Apache, nginx and Caddy sites, PHP-FPM pools and
-logrotate entries, finds orphaned entries, creates backups, and generates
+It shows users with their Apache, nginx and Caddy sites, PHP-FPM pools,
+logrotate entries and MySQL databases (from ~/.my.cnf), finds orphaned entries, creates backups, and generates
 the shell commands to remove a user. It never deletes anything itself: the
 administrator reviews and runs the generated commands.`,
 		Version: version,
@@ -275,6 +314,7 @@ are left out unless a username is given. Areas:
 			if err != nil {
 				fail("Error reading passwd file: %v", err)
 			}
+			skipMySQL = !filter.has("mysql") && !filter.has("findings")
 			inv := collectInventory(all)
 
 			users := make(map[string]*User)

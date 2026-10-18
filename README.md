@@ -76,15 +76,19 @@ commands to remove a user; you review them and run them yourself.
 # Show only some areas (comma separated, also with <username> and --json).
 # Users with nothing in these areas are left out; "list --help" lists all
 # areas: users, sites, apache, nginx, caddy, php, systemd, cron, etc,
-# sudoers, sshd, limits, aliases, logrotate, dirs, files, unowned, findings
+# sudoers, sshd, limits, aliases, logrotate, mysql, dirs, files, unowned,
+# findings
 ./UserCleanup list --only users            # accounts only
+./UserCleanup list --only mysql            # MySQL databases and tables
 ./UserCleanup list --only apache,php       # Apache sites and PHP-FPM pools
 ./UserCleanup list --only findings         # orphaned or broken entries
 ./UserCleanup list <username> --only systemd,cron
 
 # Back up a user (run as root). Writes <user>-<time>.tar.gz with owners and
 # permissions preserved, a .manifest.json (incl. passwd/shadow/group entries)
-# and a .sha256 file into /var/backups/usercleanup (mode 0700).
+# and a .sha256 file into /var/backups/usercleanup (mode 0700). If the user
+# has a ~/.my.cnf, a mysqldump of its databases is written next to it
+# (<user>-<time>.mysql.sql.gz, also in the .sha256 file).
 ./UserCleanup backup <username>
 ./UserCleanup backup <username> --dry-run   # only show what would be saved
 
@@ -119,6 +123,18 @@ tar -xzpf /var/backups/usercleanup/<user>-<time>.tar.gz -C /
 | SSH | `/etc/ssh/sshd_config`, `sshd_config.d` | `AllowUsers`, `DenyUsers`, `Match User` |
 | limits | `/etc/security/limits.conf`, `limits.d` | domain column |
 | mail | `/etc/aliases` | alias name and local targets |
+| MySQL/MariaDB | `~/.my.cnf` (`[client]`, `[mysql]`) | the login in the user's home; databases and tables it can see (`information_schema`) |
+
+MySQL: usercleanup reads host, port, socket, user and password from
+`~/.my.cnf` and runs the `mysql` client (or `mariadb`) with a temporary
+option file that holds only these values, so options like `plugin-dir`
+from the user's file are never used as root. Passwords are never shown.
+Table sizes are data plus index length, row counts are estimates for
+InnoDB. Logins with privileges on all databases (like an admin login) are
+listed, but their databases are not assigned to the user, not dumped and
+only appear as comments in the commands. A database that another user's
+`~/.my.cnf` also reaches is marked as shared. If the server cannot be
+reached or no client is installed, this is shown as a note and a finding.
 
 A site belongs to the user of its PHP-FPM pool only if neither a suexec
 user nor the owner of the document root identifies it; a pool used by sites
@@ -133,7 +149,8 @@ users, sites with a missing document root, user or PHP-FPM socket, sites
 and logrotate entries in an orphaned home, logrotate entries with a missing
 user or log directory, systemd units of missing users or using files in
 an orphaned home, sudoers and cron entries of missing users (a new user
-with that name would inherit them), lingering for missing users.
+with that name would inherit them), lingering for missing users,
+`~/.my.cnf` files that are readable by everyone or whose login fails.
 
 ### The generated commands
 
@@ -148,7 +165,12 @@ with that name would inherit them), lingering for missing users.
    lines in `/etc/sudoers`, `/etc/crontab`, `sshd_config` and `/etc/aliases`
    (`visudo -c`, `sshd -t`, `newaliases`).
 3. Other files in /etc that mention the user (text search), commented out.
-4. Stop and remove the user's systemd units and timers (overrides of vendor
+4. MySQL: `DROP DATABASE IF EXISTS` for the databases of the user's login
+   and `DROP USER IF EXISTS` for the login, run with root's own MySQL
+   access (`mysql -e ...`, with `-h`/`-P` or `-S` from `~/.my.cnf`).
+   Databases that are shared, not in the backup, or seen by a login with
+   privileges on all databases are only listed as comments.
+5. Stop and remove the user's systemd units and timers (overrides of vendor
    units and root services using the user's files only as comments),
    disable lingering, stop the user's processes,
    remove the crontab, `userdel`, remove the home directory only if it is

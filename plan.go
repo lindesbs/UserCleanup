@@ -262,6 +262,12 @@ func buildDeletePlan(user *User, inv *Inventory, archivePath string, manifest *M
 		line("")
 	}
 
+	if len(data.MySQL) > 0 {
+		section("MySQL databases and logins of %s", user.Username)
+		mysqlPlan(line, user, data.MySQL, inv.MySQL, manifest, archivePath)
+		line("")
+	}
+
 	if len(data.Units) > 0 {
 		section("systemd units of %s", user.Username)
 		live := false
@@ -353,7 +359,64 @@ func buildDeletePlan(user *User, inv *Inventory, archivePath string, manifest *M
 		line("# compare them by hand, e.g.: tar -xzf %s -O %s | diff - %s",
 			shellQuote(archivePath), shellQuote(strings.TrimPrefix(shared[0], "/")), shellQuote(shared[0]))
 	}
+	for _, dump := range manifest.MySQL {
+		line("# Restore databases %s: zcat %s | mysql", strings.Join(dump.Databases, ", "),
+			shellQuote(filepath.Join(filepath.Dir(archivePath), dump.File)))
+	}
 	line("# Account entries: see account_lines in %s",
 		strings.TrimSuffix(archivePath, ".tar.gz")+".manifest.json")
 	return b.String(), nil
+}
+
+// mysqlPlan writes the commands to drop the databases and logins of the
+// user's ~/.my.cnf files. Databases that other users reach, that are not
+// in the backup, or that belong to a login with privileges on all
+// databases are only listed as comments.
+func mysqlPlan(line func(string, ...any), user *User, accounts, all []*MySQLAccount, manifest *Manifest, archivePath string) {
+	line("#    Runs with the MySQL administrator login of root (unix socket or")
+	line("#    /root/.my.cnf), not with ~/.my.cnf, which is removed with the home.")
+	for _, acct := range accounts {
+		line("#    %s: %s", acct.File, acct.Label())
+		switch {
+		case acct.Error != "":
+			line("#    Not checked (%s); look at its databases by hand.", acct.Error)
+			continue
+		case acct.Global:
+			line("#    This login has privileges on all databases, so none of them is")
+			line("#    assigned to %s. Check by hand which ones are still needed:", user.Username)
+			for _, db := range acct.Databases {
+				line("# %s", acct.adminCommand("DROP DATABASE IF EXISTS "+sqlIdent(db.Name)+";"))
+			}
+			continue
+		}
+		for _, db := range acct.Databases {
+			drop := acct.adminCommand("DROP DATABASE IF EXISTS " + sqlIdent(db.Name) + ";")
+			switch {
+			case len(db.SharedWith) > 0:
+				line("#    %s is also used by %s; keep it or drop it by hand:", db.Name, strings.Join(db.SharedWith, ", "))
+				line("# %s", drop)
+			case !manifest.HasDatabase(acct.Endpoint(), db.Name):
+				line("#    %s is not in %s; run \"usercleanup backup %s\" again first:",
+					db.Name, filepath.Base(archivePath), user.Username)
+				line("# %s", drop)
+			default:
+				line("%s", drop)
+			}
+		}
+		account := acct.Account
+		if account == "" {
+			account = acct.User + "@localhost"
+		}
+		name, _, _ := strings.Cut(account, "@")
+		drop := acct.adminCommand("DROP USER IF EXISTS " + sqlAccount(account) + ";")
+		switch others := accountShared(acct, all); {
+		case mysqlSystemAccounts[name]:
+			line("#    %s is a system login and stays.", account)
+		case len(others) > 0:
+			line("#    The login %s is also used by %s; keep it or drop it by hand:", account, strings.Join(others, ", "))
+			line("# %s", drop)
+		default:
+			line("%s", drop)
+		}
+	}
 }

@@ -23,6 +23,7 @@ var listAreas = map[string]string{
 	"limits":    "limits entries",
 	"aliases":   "mail aliases",
 	"logrotate": "logrotate entries",
+	"mysql":     "MySQL databases and tables of the login in ~/.my.cnf",
 	"dirs":      "directories outside the home",
 	"files":     "other files in /etc that mention the user",
 	"unowned":   "sites without a known owner",
@@ -121,6 +122,9 @@ func (f listFilter) apply(data UserData) UserData {
 	if f.has("dirs") {
 		out.Dirs = data.Dirs
 	}
+	if f.has("mysql") {
+		out.MySQL = data.MySQL
+	}
 	return out
 }
 
@@ -149,7 +153,7 @@ func (f listFilter) shows(user *User, data UserData) bool {
 	d := f.apply(data)
 	return len(d.Sites) > 0 || len(d.Pools) > 0 || len(d.Units) > 0 ||
 		len(d.UserUnits) > 0 || d.Linger || len(d.Refs) > 0 ||
-		len(d.Logrotate) > 0 || len(d.Dirs) > 0 ||
+		len(d.Logrotate) > 0 || len(d.Dirs) > 0 || len(d.MySQL) > 0 ||
 		(f.crontab() && exists(filepath.Join(cronDir, user.Username))) ||
 		(f.has("files") && len(otherConfigs(user, data)) > 0)
 }
