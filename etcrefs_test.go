@@ -89,6 +89,7 @@ func TestReferences(t *testing.T) {
 		t.Errorf("findings = %+v", inv.Findings)
 	}
 
+	users["web"].Configs = data.Files()
 	script, err := buildDeletePlan(users["web"], inv, "/var/backups/usercleanup/web-20261018-090000.tar.gz", &Manifest{Username: "web"})
 	if err != nil {
 		t.Fatal(err)
@@ -113,6 +114,12 @@ func TestReferences(t *testing.T) {
 		if !strings.Contains(script, want) {
 			t.Errorf("plan misses %q:\n%s", want, script)
 		}
+	}
+	restore := script[strings.Index(script, "# Restore files:"):]
+	restore = restore[:strings.Index(restore, "\n")]
+	if !strings.Contains(restore, "--exclude='"+strings.TrimPrefix(filepath.Join(etcDir, "aliases"), "/")+"'") ||
+		strings.Contains(restore, "sudoers.d/web'") || strings.Contains(restore, "web-worker") {
+		t.Errorf("restore must exclude shared files only: %s", restore)
 	}
 	// ignored by sudo, so not a reference and not touched
 	if strings.Contains(script, "README.txt") && !strings.Contains(script, "# rm -- "+q("sudoers.d/README.txt")) {

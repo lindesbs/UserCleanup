@@ -62,7 +62,8 @@ func serviceFor(kind, version string) (string, *serviceChanges) {
 
 // configChanges builds the per service commands to remove the user's
 // sites, pools and logrotate entries
-func configChanges(username string, inv *Inventory) []*serviceChanges {
+// The second result holds the files that are removed completely.
+func configChanges(username string, inv *Inventory) ([]*serviceChanges, map[string]bool) {
 	services := make(map[string]*serviceChanges)
 	var order []string
 	done := make(map[string]bool)
@@ -86,6 +87,7 @@ func configChanges(username string, inv *Inventory) []*serviceChanges {
 			}
 			done[file] = true
 			if link != "" {
+				done[link] = true
 				svc.live = append(svc.live, "rm -- "+shellQuote(link))
 			}
 			svc.live = append(svc.live, "rm -- "+shellQuote(file))
@@ -141,7 +143,7 @@ func configChanges(username string, inv *Inventory) []*serviceChanges {
 	for _, key := range order {
 		result = append(result, services[key])
 	}
-	return result
+	return result, done
 }
 
 // buildDeletePlan returns a shell script with the commands to remove a
@@ -210,7 +212,16 @@ func buildDeletePlan(user *User, inv *Inventory, archivePath string, manifest *M
 
 	// Configs go first: a PHP-FPM pool or vhost of a deleted user stops
 	// the whole service on its next reload.
-	for _, svc := range configChanges(user.Username, inv) {
+	changes, removed := configChanges(user.Username, inv)
+	for _, unit := range data.Units {
+		if !unit.DropIn && unit.User == user.Username {
+			removed[unit.File] = true
+			if unit.Timer != "" {
+				removed[unit.Timer] = true
+			}
+		}
+	}
+	for _, svc := range changes {
 		section("%s configuration", svc.title)
 		for _, cmd := range svc.manual {
 			line("%s", cmd)
@@ -324,7 +335,24 @@ func buildDeletePlan(user *User, inv *Inventory, archivePath string, manifest *M
 	}
 	line("")
 
-	line("# Restore files:   tar -xzpf %s -C /", shellQuote(archivePath))
+	// Shared files in the backup (e.g. /etc/crontab) also hold entries of
+	// others; restoring them would undo later changes, so they are excluded
+	var shared []string
+	for _, config := range user.Configs {
+		if !removed[config] && isUnder(config, etcDir) {
+			shared = append(shared, config)
+		}
+	}
+	excludes := ""
+	for _, file := range shared {
+		excludes += " --exclude=" + shellQuote(strings.TrimPrefix(file, "/"))
+	}
+	line("# Restore files:   tar -xzpf %s -C /%s", shellQuote(archivePath), excludes)
+	if len(shared) > 0 {
+		line("# Shared files are excluded above because they also hold entries of others;")
+		line("# compare them by hand, e.g.: tar -xzf %s -O %s | diff - %s",
+			shellQuote(archivePath), shellQuote(strings.TrimPrefix(shared[0], "/")), shellQuote(shared[0]))
+	}
 	line("# Account entries: see account_lines in %s",
 		strings.TrimSuffix(archivePath, ".tar.gz")+".manifest.json")
 	return b.String(), nil
