@@ -17,7 +17,9 @@ type Inventory struct {
 	Pools     []*Pool           `json:"pools"`
 	Logrotate []*LogrotateEntry `json:"logrotate"`
 	Units     []*Unit           `json:"units"`
+	Refs      []*Reference      `json:"references"`
 	Findings  []Finding         `json:"findings"`
+	refFiles  map[string]*refFile
 	// fileOwners maps each parsed config file to the owners of its blocks;
 	// "" stands for a block without a known owner
 	fileOwners map[string]map[string]bool
@@ -37,6 +39,11 @@ type UserData struct {
 	Pools     []*Pool           `json:"pools"`
 	Logrotate []*LogrotateEntry `json:"logrotate"`
 	Units     []*Unit           `json:"units"`
+	Refs      []*Reference      `json:"references"`
+	// UserUnits are systemd user units in the home; Linger means they
+	// keep running without a login
+	UserUnits []string `json:"user_units,omitempty"`
+	Linger    bool     `json:"linger"`
 	// Dirs are directories outside the home that are owned by the user,
 	// such as webroots below /var/www or log directories
 	Dirs []string `json:"dirs"`
@@ -84,6 +91,13 @@ func collectInventory(all map[string]*User) *Inventory {
 		Logrotate:  collectLogrotate(),
 		Units:      collectUnits(),
 		fileOwners: make(map[string]map[string]bool),
+		refFiles:   make(map[string]*refFile),
+	}
+	for _, rf := range collectReferences() {
+		for _, ref := range rf.refs {
+			inv.refFiles[ref.File] = rf
+		}
+		inv.Refs = append(inv.Refs, rf.refs...)
 	}
 	inv.assignOwners()
 	inv.findOrphans()
@@ -203,7 +217,20 @@ func (inv *Inventory) assignOwners() {
 	}
 
 	for _, unit := range inv.Units {
-		unit.Owners = inv.addOwner(nil, unit.User)
+		owners := inv.addOwner(nil, unit.User)
+		for _, path := range unit.Paths {
+			for _, owner := range inv.ownersByHome(path) {
+				owners = appendUnique(owners, owner)
+			}
+		}
+		sort.Strings(owners)
+		unit.Owners = owners
+	}
+
+	for _, ref := range inv.Refs {
+		for _, name := range ref.Users {
+			ref.Owners = inv.addOwner(ref.Owners, name)
+		}
 	}
 
 	for _, entry := range inv.Logrotate {
@@ -244,8 +271,32 @@ func (inv *Inventory) For(username string) UserData {
 			data.Units = append(data.Units, unit)
 		}
 	}
+	for _, ref := range inv.Refs {
+		if contains(ref.Owners, username) {
+			data.Refs = append(data.Refs, ref)
+		}
+	}
+	if user := inv.All[username]; user != nil {
+		data.UserUnits = userUnits(user)
+	}
+	data.Linger = exists(filepath.Join(lingerDir, username))
 	data.Dirs = inv.ownedDirs(username, data)
 	return data
+}
+
+// refRemovable reports whether a whole drop-in file (sudoers.d, cron.d,
+// sshd_config.d, limits.d) only concerns username and can be removed
+func (inv *Inventory) refRemovable(file, username string) bool {
+	rf := inv.refFiles[file]
+	if rf == nil || !rf.removable || rf.other {
+		return false
+	}
+	for _, ref := range rf.refs {
+		if len(ref.Users) != 1 || ref.Users[0] != username {
+			return false
+		}
+	}
+	return true
 }
 
 // ownedDirs returns directories outside the home that belong to the user:
@@ -365,6 +416,12 @@ func (d UserData) Files() []string {
 	}
 	for _, unit := range d.Units {
 		files = appendUnique(files, unit.File)
+		if unit.Timer != "" {
+			files = appendUnique(files, unit.Timer)
+		}
+	}
+	for _, ref := range d.Refs {
+		files = appendUnique(files, ref.File)
 	}
 	sort.Strings(files)
 	return files
@@ -489,6 +546,30 @@ func (inv *Inventory) findOrphans() {
 	for _, unit := range inv.Units {
 		if unit.User != "" && inv.All[unit.User] == nil {
 			add("unit_user_missing", unit.File, 0, "systemd unit %s runs as missing user %s", unit.Name, unit.User)
+		}
+		for _, path := range unit.Paths {
+			if home := inOrphanHome(path); home != "" {
+				add("unit_in_orphan_home", unit.File, 0, "systemd unit %s uses %s in orphaned home %s", unit.Name, path, home)
+			}
+		}
+	}
+
+	for _, ref := range inv.Refs {
+		if ref.Kind != "sudoers" && ref.Kind != "cron" {
+			continue
+		}
+		for _, name := range ref.Users {
+			if inv.All[name] == nil {
+				add("ref_user_missing", ref.File, ref.Line, "%s entry for missing user %s (a new user with that name would inherit it): %s",
+					ref.Kind, name, ref.Text)
+			}
+		}
+	}
+
+	entries, _ = os.ReadDir(lingerDir)
+	for _, entry := range entries {
+		if inv.All[entry.Name()] == nil {
+			add("linger_user_missing", filepath.Join(lingerDir, entry.Name()), 0, "lingering enabled for missing user %s", entry.Name())
 		}
 	}
 }

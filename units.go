@@ -8,56 +8,105 @@ import (
 	"strings"
 )
 
-// Unit is a systemd service that runs as a specific user
+// Unit is a local systemd service that runs as a user (User=) or works with
+// files of a user (WorkingDirectory=, ExecStart=, EnvironmentFile=)
 type Unit struct {
 	Name    string   `json:"name"`
 	File    string   `json:"file"`
-	User    string   `json:"user"`
+	DropIn  bool     `json:"drop_in,omitempty"` // File is an override of a vendor unit
+	User    string   `json:"user,omitempty"`
+	Paths   []string `json:"paths,omitempty"`
 	Enabled bool     `json:"enabled"`
+	Timer   string   `json:"timer,omitempty"` // a .timer that starts this unit
 	Owners  []string `json:"owners,omitempty"`
 }
 
-// collectUnits reads the local service units in /etc/systemd/system that
-// set User=. The general analysis of systemd follows in a later step.
+// collectUnits reads the service units and drop-ins in /etc/systemd/system
 func collectUnits() []*Unit {
 	dir := filepath.Join(etcDir, "systemd", "system")
+	var units []*Unit
+
 	files, _ := filepath.Glob(filepath.Join(dir, "*.service"))
 	sort.Strings(files)
-
-	var units []*Unit
 	for _, file := range files {
 		if info, err := os.Lstat(file); err != nil || !info.Mode().IsRegular() {
 			continue // links point to vendor units or /dev/null (masked)
 		}
-		user := unitUser(file)
-		if user == "" {
-			continue
+		if unit := parseUnit(file, filepath.Base(file)); unit != nil {
+			units = append(units, unit)
 		}
-		name := filepath.Base(file)
-		wants, _ := filepath.Glob(filepath.Join(dir, "*.wants", name))
-		units = append(units, &Unit{Name: name, File: file, User: user, Enabled: len(wants) > 0})
+	}
+
+	dropIns, _ := filepath.Glob(filepath.Join(dir, "*.service.d", "*.conf"))
+	sort.Strings(dropIns)
+	for _, file := range dropIns {
+		name := strings.TrimSuffix(filepath.Base(filepath.Dir(file)), ".d")
+		if unit := parseUnit(file, name); unit != nil {
+			unit.DropIn = true
+			units = append(units, unit)
+		}
+	}
+
+	for _, unit := range units {
+		wants, _ := filepath.Glob(filepath.Join(dir, "*.wants", unit.Name))
+		unit.Enabled = len(wants) > 0
+		timer := filepath.Join(dir, strings.TrimSuffix(unit.Name, ".service")+".timer")
+		if exists(timer) {
+			unit.Timer = timer
+		}
 	}
 	return units
 }
 
-// unitUser returns the User= of the [Service] section
-func unitUser(file string) string {
+// parseUnit reads User= and the paths of the [Service] section; it returns
+// nil for units that neither set a user nor use absolute paths
+func parseUnit(file, name string) *Unit {
 	f, err := os.Open(file)
 	if err != nil {
-		return ""
+		return nil
 	}
 	defer f.Close()
 
-	section, user := "", ""
+	unit := &Unit{Name: name, File: file}
+	section := ""
 	scanner := bufio.NewScanner(f)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())
-		switch {
-		case strings.HasPrefix(line, "["):
+		if strings.HasPrefix(line, "[") {
 			section = line
-		case section == "[Service]" && strings.HasPrefix(line, "User="):
-			user = strings.TrimSpace(strings.TrimPrefix(line, "User="))
+			continue
+		}
+		key, value, ok := strings.Cut(line, "=")
+		if section != "[Service]" || !ok {
+			continue
+		}
+		value = strings.TrimSpace(value)
+		switch strings.TrimSpace(key) {
+		case "User":
+			unit.User = value
+		case "WorkingDirectory", "EnvironmentFile", "ExecStart":
+			// ExecStart=-/path args, EnvironmentFile=-/path
+			fields := strings.Fields(value)
+			if len(fields) > 0 {
+				path := strings.TrimLeft(fields[0], "-@:+!")
+				if strings.HasPrefix(path, "/") {
+					unit.Paths = appendUnique(unit.Paths, path)
+				}
+			}
 		}
 	}
-	return user
+	if unit.User == "" && len(unit.Paths) == 0 {
+		return nil
+	}
+	return unit
+}
+
+// userUnits returns the systemd user units in the user's home
+func userUnits(user *User) []string {
+	if filepath.Clean(user.HomeDir) == "/" {
+		return nil
+	}
+	files, _ := filepath.Glob(filepath.Join(user.HomeDir, ".config", "systemd", "user", "*.service"))
+	sort.Strings(files)
+	return files
 }

@@ -18,6 +18,7 @@ var (
 	etcDir       = "/etc"
 	cronDir      = "/var/spool/cron/crontabs"
 	mailDir      = "/var/mail"
+	lingerDir    = "/var/lib/systemd/linger"
 	passwdFile   = "/etc/passwd"
 	accountFiles = []string{
 		"/etc/passwd", "/etc/shadow", "/etc/group",
@@ -115,10 +116,32 @@ func printUserInfo(user *User, data UserData) {
 				state = "enabled"
 			}
 			fmt.Printf("  - %s (%s)\n      file: %s\n", unit.Name, state, unit.File)
+			if unit.User != user.Username {
+				fmt.Printf("      runs as %q but uses: %s\n", unit.User, strings.Join(unit.Paths, ", "))
+			}
+			if unit.Timer != "" {
+				fmt.Printf("      timer: %s\n", unit.Timer)
+			}
 		}
 	}
 	if crontab := filepath.Join(cronDir, user.Username); exists(crontab) {
 		fmt.Printf("Crontab: %s\n", crontab)
+	}
+	if len(data.UserUnits) > 0 || data.Linger {
+		fmt.Printf("systemd user services: %d", len(data.UserUnits))
+		if data.Linger {
+			fmt.Print(" (linger enabled: they run without login)")
+		}
+		fmt.Println()
+		for _, unit := range data.UserUnits {
+			fmt.Printf("  - %s\n", unit)
+		}
+	}
+	if len(data.Refs) > 0 {
+		fmt.Println("Entries in /etc:")
+		for _, ref := range data.Refs {
+			fmt.Printf("  - %s %s:%d\n      %s\n", ref.Kind, ref.File, ref.Line, ref.Text)
+		}
 	}
 	if len(data.Dirs) > 0 {
 		fmt.Println("Directories outside the home:")

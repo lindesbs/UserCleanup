@@ -40,6 +40,16 @@ func serviceFor(kind, version string) (string, *serviceChanges) {
 		}
 		return "php" + version, &serviceChanges{title: "PHP-FPM " + version,
 			test: "php-fpm" + version + " -t", reload: "systemctl reload php" + version + "-fpm"}
+	case "sudoers":
+		return kind, &serviceChanges{title: "sudo", test: "visudo -c"}
+	case "cron":
+		return kind, &serviceChanges{title: "System crontabs"}
+	case "sshd":
+		return kind, &serviceChanges{title: "SSH server", test: "sshd -t", reload: "systemctl reload ssh"}
+	case "limits":
+		return kind, &serviceChanges{title: "Resource limits"}
+	case "aliases":
+		return kind, &serviceChanges{title: "Mail aliases", test: "newaliases"}
 	default:
 		// Only a warning: errors of other entries (e.g. an su user that is
 		// already gone) would otherwise stop the script halfway.
@@ -57,7 +67,7 @@ func configChanges(username string, inv *Inventory) []*serviceChanges {
 	var order []string
 	done := make(map[string]bool)
 
-	add := func(kind, version, file string, line, endLine int, what, link, keep string) {
+	add := func(kind, version, file string, line, endLine int, what, link, keep string, removable bool) {
 		key, fresh := serviceFor(kind, version)
 		svc := services[key]
 		if svc == nil {
@@ -70,7 +80,7 @@ func configChanges(username string, inv *Inventory) []*serviceChanges {
 				shellQuote(file), line, endLine, what, keep))
 			return
 		}
-		if inv.dedicated(file, username) {
+		if removable {
 			if done[file] {
 				return
 			}
@@ -81,8 +91,12 @@ func configChanges(username string, inv *Inventory) []*serviceChanges {
 			svc.live = append(svc.live, "rm -- "+shellQuote(file))
 			return
 		}
-		svc.manual = append(svc.manual, fmt.Sprintf("# %s lines %d-%d: %s (file is shared, remove this block by hand)",
-			shellQuote(file), line, endLine, what))
+		lines := fmt.Sprintf("lines %d-%d", line, endLine)
+		if line == endLine {
+			lines = fmt.Sprintf("line %d", line)
+		}
+		svc.manual = append(svc.manual, fmt.Sprintf("# %s %s: %s (file is shared, remove or edit this by hand)",
+			shellQuote(file), lines, what))
 	}
 
 	data := inv.For(username)
@@ -91,17 +105,23 @@ func configChanges(username string, inv *Inventory) []*serviceChanges {
 		if len(pool.UsedBy) > 0 {
 			keep = "also used by " + strings.Join(pool.UsedBy, ", ")
 		}
-		add("php", pool.Version, pool.File, pool.Line, pool.EndLine, "pool ["+pool.Name+"]", "", keep)
+		add("php", pool.Version, pool.File, pool.Line, pool.EndLine, "pool ["+pool.Name+"]", "", keep,
+			inv.dedicated(pool.File, username))
 	}
 	for _, site := range data.Sites {
 		what := "site"
 		if len(site.Names) > 0 {
 			what += " " + strings.Join(site.Names, " ")
 		}
-		add(site.Server, "", site.File, site.Line, site.EndLine, what, site.EnabledLink, "")
+		add(site.Server, "", site.File, site.Line, site.EndLine, what, site.EnabledLink, "",
+			inv.dedicated(site.File, username))
 	}
 	for _, entry := range data.Logrotate {
-		add("logrotate", "", entry.File, entry.Line, entry.EndLine, strings.Join(entry.Paths, " "), "", "")
+		add("logrotate", "", entry.File, entry.Line, entry.EndLine, strings.Join(entry.Paths, " "), "", "",
+			inv.dedicated(entry.File, username))
+	}
+	for _, ref := range data.Refs {
+		add(ref.Kind, "", ref.File, ref.Line, ref.Line, ref.Text, "", "", inv.refRemovable(ref.File, username))
 	}
 
 	sort.SliceStable(order, func(i, j int) bool {
@@ -202,7 +222,9 @@ func buildDeletePlan(user *User, inv *Inventory, archivePath string, manifest *M
 		if len(svc.live) == 0 {
 			prefix = "# "
 		}
-		line("%s%s", prefix, svc.test)
+		if svc.test != "" {
+			line("%s%s", prefix, svc.test)
+		}
 		if svc.reload != "" {
 			line("%s%s", prefix, svc.reload)
 		}
@@ -230,12 +252,42 @@ func buildDeletePlan(user *User, inv *Inventory, archivePath string, manifest *M
 	}
 
 	if len(data.Units) > 0 {
-		section("Stop and remove systemd units running as %s", user.Username)
+		section("systemd units of %s", user.Username)
+		live := false
 		for _, unit := range data.Units {
-			line("systemctl disable --now %s", shellQuote(unit.Name))
-			line("rm -- %s", shellQuote(unit.File))
+			switch {
+			case unit.DropIn:
+				line("# %s overrides the vendor unit %s for this user; disable the unit or", shellQuote(unit.File), unit.Name)
+				line("# remove the override by hand:")
+				line("# systemctl disable --now %s; rm -- %s", shellQuote(unit.Name), shellQuote(unit.File))
+			case unit.User != user.Username:
+				line("# %s does not run as %s but uses its files (%s); adapt it by hand",
+					shellQuote(unit.File), user.Username, strings.Join(unit.Paths, ", "))
+			default:
+				live = true
+				if unit.Timer != "" {
+					line("systemctl disable --now %s", shellQuote(filepath.Base(unit.Timer)))
+					line("rm -- %s", shellQuote(unit.Timer))
+				}
+				line("systemctl disable --now %s", shellQuote(unit.Name))
+				line("rm -- %s", shellQuote(unit.File))
+			}
 		}
-		line("systemctl daemon-reload")
+		if live {
+			line("systemctl daemon-reload")
+		}
+		line("")
+	}
+
+	if data.Linger || len(data.UserUnits) > 0 {
+		section("systemd user services of %s", user.Username)
+		for _, unit := range data.UserUnits {
+			line("#    %s (removed with the home)", unit)
+		}
+		if data.Linger {
+			line("loginctl disable-linger %s", u)
+		}
+		line("loginctl terminate-user %s || true", u)
 		line("")
 	}
 

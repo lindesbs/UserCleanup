@@ -97,7 +97,13 @@ tar -xzpf /var/backups/usercleanup/<user>-<time>.tar.gz -C /
 | Caddy | `/etc/caddy/Caddyfile` and its imports | `root` in the home, `php_fastcgi` to the user's pool |
 | PHP-FPM | `/etc/php/*/fpm/pool.d`, `/etc/php-fpm.d` | `user =` of the pool |
 | logrotate | `/etc/logrotate.conf`, `/etc/logrotate.d` | `su`/`create` user, log directory in the home or owned by the user |
-| systemd | `/etc/systemd/system/*.service` | `User=` |
+| systemd | `/etc/systemd/system/*.service`, drop-ins `*.service.d/*.conf`, timers | `User=`, or `WorkingDirectory=`/`ExecStart=`/`EnvironmentFile=` in the home |
+| systemd user services | `~/.config/systemd/user`, `/var/lib/systemd/linger` | home, linger file |
+| sudo | `/etc/sudoers`, `/etc/sudoers.d` | user specifications, `User_Alias`, `Defaults:user` |
+| cron | `/etc/crontab`, `/etc/cron.d` | user column of each job |
+| SSH | `/etc/ssh/sshd_config`, `sshd_config.d` | `AllowUsers`, `DenyUsers`, `Match User` |
+| limits | `/etc/security/limits.conf`, `limits.d` | domain column |
+| mail | `/etc/aliases` | alias name and local targets |
 
 A site belongs to the user of its PHP-FPM pool only if neither a suexec
 user nor the owner of the document root identifies it; a pool used by sites
@@ -110,7 +116,9 @@ Orphaned or broken entries: directories in /home without a user, pools
 running as a missing user or with a missing `chdir`, pools shared between
 users, sites with a missing document root, user or PHP-FPM socket, sites
 and logrotate entries in an orphaned home, logrotate entries with a missing
-user or log directory, systemd units of missing users.
+user or log directory, systemd units of missing users or using files in
+an orphaned home, sudoers and cron entries of missing users (a new user
+with that name would inherit them), lingering for missing users.
 
 ### The generated commands
 
@@ -121,8 +129,13 @@ user or log directory, systemd units of missing users.
    files shared with other users or sites, and the main Caddyfile, are
    listed with their line numbers to edit by hand; the test and reload for
    that service are then commented out too.
+   The same applies to sudoers, cron, sshd and limits drop-in files and
+   lines in `/etc/sudoers`, `/etc/crontab`, `sshd_config` and `/etc/aliases`
+   (`visudo -c`, `sshd -t`, `newaliases`).
 3. Other files in /etc that mention the user (text search), commented out.
-4. Stop and remove the user's systemd units, stop the user's processes,
+4. Stop and remove the user's systemd units and timers (overrides of vendor
+   units and root services using the user's files only as comments),
+   disable lingering, stop the user's processes,
    remove the crontab, `userdel`, remove the home directory only if it is
    exactly `/home/<user>` and not shared with another user, and remove the
    directories outside the home owned by the user.
