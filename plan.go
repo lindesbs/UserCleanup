@@ -257,12 +257,11 @@ func buildDeletePlan(user *User, inv *Inventory, archivePath string, manifest *M
 		for _, unit := range data.Units {
 			switch {
 			case unit.DropIn:
-				line("# %s overrides the vendor unit %s for this user; disable the unit or", shellQuote(unit.File), unit.Name)
-				line("# remove the override by hand:")
-				line("# systemctl disable --now %s; rm -- %s", shellQuote(unit.Name), shellQuote(unit.File))
+				line("# %s overrides %s for this user; check and remove it by hand:", shellQuote(unit.File), unit.Name)
+				line("# rm -- %s; systemctl daemon-reload; systemctl try-restart %s", shellQuote(unit.File), shellQuote(unit.Name))
 			case unit.User != user.Username:
 				line("# %s does not run as %s but uses its files (%s); adapt it by hand",
-					shellQuote(unit.File), user.Username, strings.Join(unit.Paths, ", "))
+					shellQuote(unit.File), user.Username, strings.Join(unit.HomePaths(user), ", "))
 			default:
 				live = true
 				if unit.Timer != "" {

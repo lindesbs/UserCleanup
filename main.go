@@ -117,7 +117,7 @@ func printUserInfo(user *User, data UserData) {
 			}
 			fmt.Printf("  - %s (%s)\n      file: %s\n", unit.Name, state, unit.File)
 			if unit.User != user.Username {
-				fmt.Printf("      runs as %q but uses: %s\n", unit.User, strings.Join(unit.Paths, ", "))
+				fmt.Printf("      runs as %q but uses: %s\n", unit.User, strings.Join(unit.HomePaths(user), ", "))
 			}
 			if unit.Timer != "" {
 				fmt.Printf("      timer: %s\n", unit.Timer)

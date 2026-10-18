@@ -106,7 +106,7 @@ func TestReferences(t *testing.T) {
 		"# newaliases\n",
 		"systemctl disable --now 'web-worker.timer'\nrm -- " + q("systemd/system/web-worker.timer") +
 			"\nsystemctl disable --now 'web-worker.service'\nrm -- " + q("systemd/system/web-worker.service"),
-		"# " + q("systemd/system/php8.2-fpm.service.d/override.conf") + " overrides the vendor unit php8.2-fpm.service",
+		"# " + q("systemd/system/php8.2-fpm.service.d/override.conf") + " overrides php8.2-fpm.service for this user",
 		"# " + q("systemd/system/export.service") + " does not run as web but uses its files",
 		"loginctl disable-linger 'web'\nloginctl terminate-user 'web' || true\n",
 	} {

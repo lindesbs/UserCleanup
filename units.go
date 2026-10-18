@@ -101,6 +101,17 @@ func parseUnit(file, name string) *Unit {
 	return unit
 }
 
+// HomePaths returns the paths of the unit inside the user's home
+func (u *Unit) HomePaths(user *User) []string {
+	var paths []string
+	for _, path := range u.Paths {
+		if isUnder(path, user.HomeDir) {
+			paths = append(paths, path)
+		}
+	}
+	return paths
+}
+
 // userUnits returns the systemd user units in the user's home
 func userUnits(user *User) []string {
 	if filepath.Clean(user.HomeDir) == "/" {
