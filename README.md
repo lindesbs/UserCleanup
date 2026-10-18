@@ -9,28 +9,34 @@ UserCleanup is a CLI tool for managing user accounts on Debian and Ubuntu system
 - Display configurations in /etc for each user
 - Backup and delete users and their files
 
-## Building for Debian
+## Building
 
-This project includes tools for cross-compiling the application to run on various Debian architectures.
+The Makefile builds the application for the current platform and cross-compiles it for Linux and macOS.
 
 ### Prerequisites
 
 - Go 1.24 or later
-- Make (optional, for using the Makefile)
+- Make
 
 ### Using the Makefile
 
-The project includes a Makefile with targets for cross-compiling to different Debian architectures:
-
 ```bash
-# Build for all Debian architectures
-make debian
+# Build for the current platform
+make build
 
-# Build for specific Debian architecture
-make debian-amd64  # For 64-bit systems
-make debian-386    # For 32-bit systems
-make debian-arm64  # For ARM 64-bit systems
-make debian-arm    # For ARM 32-bit systems
+# Build for all Linux and macOS targets
+make release
+
+# Build for all Linux architectures (amd64, 386, arm64, arm)
+make linux
+make linux-amd64   # single architecture, also linux-386, linux-arm64, linux-arm
+
+# Build for macOS (Intel and Apple Silicon)
+make macos
+make darwin-arm64  # single architecture, also darwin-amd64
+
+# The former debian targets still work as aliases for the linux targets
+make debian
 
 # Clean build artifacts
 make clean
@@ -40,18 +46,6 @@ make deps
 
 # Show help
 make help
-```
-
-### Using the Shell Script
-
-Alternatively, you can use the provided shell script:
-
-```bash
-# Make the script executable
-chmod +x build.sh
-
-# Run the script to build for all Debian architectures
-./build.sh
 ```
 
 ## Usage
