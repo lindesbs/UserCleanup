@@ -67,6 +67,15 @@ commands to remove a user; you review them and run them yourself.
 ./UserCleanup list <username>
 ./UserCleanup list --json
 
+# Show only some areas (comma separated, also with <username> and --json).
+# Users with nothing in these areas are left out; "list --help" lists all
+# areas: users, sites, apache, nginx, caddy, php, systemd, cron, etc,
+# sudoers, sshd, limits, aliases, logrotate, dirs, files, unowned, findings
+./UserCleanup list --only users            # accounts only
+./UserCleanup list --only apache,php       # Apache sites and PHP-FPM pools
+./UserCleanup list --only findings         # orphaned or broken entries
+./UserCleanup list <username> --only systemd,cron
+
 # Back up a user (run as root). Writes <user>-<time>.tar.gz with owners and
 # permissions preserved, a .manifest.json (incl. passwd/shadow/group entries)
 # and a .sha256 file into /var/backups/usercleanup (mode 0700).

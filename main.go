@@ -29,6 +29,7 @@ var (
 	dryRun      bool
 	systemUsers bool
 	jsonOutput  bool
+	listOnly    []string
 	planOutput  string
 	planBackup  string
 )
@@ -38,30 +39,36 @@ func lines(file string, line, endLine int) string {
 	return fmt.Sprintf("%s:%d-%d", file, line, endLine)
 }
 
-// printUserInfo prints information about a user
-func printUserInfo(user *User, data UserData) {
+// printUserInfo prints the areas of a user that the filter selects; data
+// is the unfiltered data of the user
+func printUserInfo(user *User, all UserData, f listFilter) {
+	data := f.apply(all)
 	userType := "User"
 	if user.IsSystemUser {
 		userType = "System User"
 	}
 	bold := color.New(color.Bold)
 
-	bold.Printf("Username: %s (%s)\n", user.Username, userType)
-	fmt.Printf("UID/GID: %d/%d\n", user.UID, user.GID)
-	fmt.Printf("Home Directory: %s", user.HomeDir)
-	if !exists(user.HomeDir) {
-		color.New(color.FgYellow).Print(" (missing)")
-	}
-	fmt.Println()
-	fmt.Printf("Shell: %s\n", user.Shell)
-	fmt.Printf("Login: ")
-	if user.HasLogin {
-		color.New(color.FgGreen).Println("yes")
+	if !f.has("users") {
+		bold.Printf("Username: %s\n", user.Username)
 	} else {
-		color.New(color.FgYellow).Println("no")
-	}
-	if reason := isProtected(user); reason != "" {
-		color.New(color.FgRed).Printf("Protected: %s\n", reason)
+		bold.Printf("Username: %s (%s)\n", user.Username, userType)
+		fmt.Printf("UID/GID: %d/%d\n", user.UID, user.GID)
+		fmt.Printf("Home Directory: %s", user.HomeDir)
+		if !exists(user.HomeDir) {
+			color.New(color.FgYellow).Print(" (missing)")
+		}
+		fmt.Println()
+		fmt.Printf("Shell: %s\n", user.Shell)
+		fmt.Printf("Login: ")
+		if user.HasLogin {
+			color.New(color.FgGreen).Println("yes")
+		} else {
+			color.New(color.FgYellow).Println("no")
+		}
+		if reason := isProtected(user); reason != "" {
+			color.New(color.FgRed).Printf("Protected: %s\n", reason)
+		}
 	}
 
 	if len(data.Sites) > 0 {
@@ -128,7 +135,7 @@ func printUserInfo(user *User, data UserData) {
 			}
 		}
 	}
-	if crontab := filepath.Join(cronDir, user.Username); exists(crontab) {
+	if crontab := filepath.Join(cronDir, user.Username); f.crontab() && exists(crontab) {
 		fmt.Printf("Crontab: %s\n", crontab)
 	}
 	if len(data.UserUnits) > 0 || data.Linger {
@@ -161,17 +168,7 @@ func printUserInfo(user *User, data UserData) {
 		}
 	}
 
-	known := make(map[string]bool)
-	for _, file := range data.Files() {
-		known[file] = true
-	}
-	var others []string
-	for _, config := range user.Configs {
-		if !known[config] {
-			others = append(others, config)
-		}
-	}
-	if len(others) > 0 {
+	if others := otherConfigs(user, all); f.has("files") && len(others) > 0 {
 		fmt.Println("Other files in /etc that mention the user:")
 		for _, config := range others {
 			fmt.Printf("  - %s\n", config)
@@ -261,8 +258,18 @@ administrator reviews and runs the generated commands.`,
 	var listCmd = &cobra.Command{
 		Use:   "list [username]",
 		Short: "List users with their sites, pools and logrotate entries, and orphaned entries",
-		Args:  cobra.MaximumNArgs(1),
+		Long: `Lists users with everything that belongs to them, sites without a known
+owner and orphaned or broken entries. --only limits the output to some
+areas, e.g. "--only users" for the accounts or "--only apache,php" for the
+Apache sites and PHP-FPM pools. Users with nothing in the selected areas
+are left out unless a username is given. Areas:
+` + areaHelp(),
+		Args: cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
+			filter, err := parseListFilter(listOnly)
+			if err != nil {
+				fail("%v", err)
+			}
 			all, err := readPasswdFile(true)
 			if err != nil {
 				fail("Error reading passwd file: %v", err)
@@ -282,9 +289,25 @@ administrator reviews and runs the generated commands.`,
 			if len(args) == 1 && len(users) == 0 {
 				fail("User %s not found", args[0])
 			}
-			if err := findUserConfigs(users); err != nil {
-				fmt.Fprintf(os.Stderr, "Error finding user configurations: %v\n", err)
+			if filter.needsConfigs() {
+				if err := findUserConfigs(users); err != nil {
+					fmt.Fprintf(os.Stderr, "Error finding user configurations: %v\n", err)
+				}
 			}
+
+			var shown []*User
+			for _, user := range sortedUsers(users) {
+				if len(args) == 1 || filter.shows(user, inv.For(user.Username)) {
+					shown = append(shown, user)
+				}
+			}
+			// Sites without an owner and findings only belong to the overview
+			unowned := []*Site{}
+			showUnowned := len(args) == 0 && (filter.has("unowned") || filter.siteAreas())
+			if showUnowned {
+				unowned = append(unowned, filter.sites(inv.UnownedSites())...)
+			}
+			showFindings := len(args) == 0 && filter.has("findings")
 
 			if jsonOutput {
 				type userJSON struct {
@@ -293,11 +316,18 @@ administrator reviews and runs the generated commands.`,
 				}
 				out := struct {
 					Users        []userJSON `json:"users"`
-					UnownedSites []*Site    `json:"unowned_sites"`
-					Findings     []Finding  `json:"findings"`
-				}{UnownedSites: inv.UnownedSites(), Findings: inv.Findings}
-				for _, user := range sortedUsers(users) {
-					out.Users = append(out.Users, userJSON{user, inv.For(user.Username)})
+					UnownedSites *[]*Site   `json:"unowned_sites,omitempty"`
+					Findings     *[]Finding `json:"findings,omitempty"`
+				}{Users: []userJSON{}}
+				if showUnowned {
+					out.UnownedSites = &unowned
+				}
+				if showFindings {
+					findings := append([]Finding{}, inv.Findings...)
+					out.Findings = &findings
+				}
+				for _, user := range shown {
+					out.Users = append(out.Users, userJSON{user, filter.apply(inv.For(user.Username))})
 				}
 				enc := json.NewEncoder(os.Stdout)
 				enc.SetIndent("", "  ")
@@ -307,12 +337,16 @@ administrator reviews and runs the generated commands.`,
 				return
 			}
 
-			fmt.Printf("Found %d users\n\n", len(users))
-			for _, user := range sortedUsers(users) {
-				printUserInfo(user, inv.For(user.Username))
+			if filter.has("users") {
+				fmt.Printf("Found %d users\n\n", len(shown))
 			}
-			if len(args) == 0 {
-				printUnownedSites(inv.UnownedSites())
+			for _, user := range shown {
+				printUserInfo(user, inv.For(user.Username), filter)
+			}
+			if showUnowned {
+				printUnownedSites(unowned)
+			}
+			if showFindings {
 				printFindings(inv.Findings)
 			}
 		},
@@ -392,6 +426,10 @@ unless --backup is given. System and service users are refused.`,
 	rootCmd.PersistentFlags().BoolVarP(&systemUsers, "system-users", "s", false, "Include system users (UID < 1000) in list")
 	rootCmd.PersistentFlags().StringVarP(&backupDir, "backup-dir", "b", backupDir, "Absolute backup directory, outside of any home")
 	listCmd.Flags().BoolVar(&jsonOutput, "json", false, "Print the result as JSON")
+	listCmd.Flags().StringSliceVar(&listOnly, "only", nil, "Show only these areas, comma separated (see list --help)")
+	listCmd.RegisterFlagCompletionFunc("only", func(*cobra.Command, []string, string) ([]string, cobra.ShellCompDirective) {
+		return sortedAreas(), cobra.ShellCompDirectiveNoFileComp
+	})
 	backupCmd.Flags().BoolVarP(&dryRun, "dry-run", "d", false, "Show what would be backed up without writing anything")
 	planCmd.Flags().StringVarP(&planOutput, "output", "o", "", "Write the commands to this file instead of stdout")
 	planCmd.Flags().StringVar(&planBackup, "backup", "", "Backup archive to reference (default: newest of the user)")
