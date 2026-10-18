@@ -75,8 +75,11 @@ func findUserConfigs(users map[string]*User) error {
 	}
 
 	err := filepath.WalkDir(etcDir, func(path string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() || isAccountFile(path) {
-			return nil // Skip unreadable entries and account databases
+		// Skip unreadable entries, account databases and symlinks: links
+		// like sites-enabled/* or *.wants/* point to files found anyway,
+		// /etc/mtab points into /proc
+		if err != nil || d.IsDir() || d.Type()&fs.ModeSymlink != 0 || isAccountFile(path) {
+			return nil
 		}
 
 		content := readTextFile(path)
