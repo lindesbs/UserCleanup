@@ -1,3 +1,5 @@
 UserCleanup
 UserCleanup-linux-*
 backups/
+UserCleanup-darwin-*
+dist/
