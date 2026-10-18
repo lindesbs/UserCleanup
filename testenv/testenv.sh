@@ -69,6 +69,27 @@ put_file() {
 	grep -qxF "replaced $path" "$MANIFEST" || record file "$path"
 }
 
+# put_block DATEI: haengt stdin als markierten Block an eine gemeinsam
+# genutzte Datei an (z. B. /etc/crontab). Ein frueherer Block wird vorher
+# entfernt, teardown loescht den Block wieder.
+BLOCK_BEGIN="# BEGIN $MARKER"
+BLOCK_END="# END $MARKER"
+remove_block() {
+	[ -f "$1" ] || return 0
+	sed -i "/^$BLOCK_BEGIN\$/,/^$BLOCK_END\$/d" "$1"
+}
+put_block() {
+	local path=$1
+	if [ ! -f "$path" ]; then
+		touch "$path"
+		record file "$path"   # gab es vorher nicht: teardown entfernt sie
+	fi
+	remove_block "$path"
+	[ -z "$(tail -c1 "$path")" ] || echo >>"$path"
+	{ echo "$BLOCK_BEGIN"; cat; echo "$BLOCK_END"; } >>"$path"
+	record block "$path"
+}
+
 # make_dir PFAD [OWNER]: legt Verzeichnis an und merkt es
 make_dir() {
 	local path=$1 owner=${2:-}
@@ -408,6 +429,105 @@ setup_misc() {
 	fi
 }
 
+# Eintraege in /etc und systemd, die UserCleanup Zeile fuer Zeile auswertet:
+# gemeinsam genutzte Dateien (Block mit Markern) und Drop-ins nur fuer einen
+# Nutzer. Fehlende Nutzer (erin) erzeugen Problemfaelle.
+setup_etc_refs() {
+	log "Lege Eintraege in crontab, aliases, limits, sshd, sudoers und systemd an"
+
+	put_block /etc/crontab <<-EOF
+	*/30 * * * * ${PREFIX}alice /usr/bin/true
+	0 4 * * * ${PREFIX}erin /usr/bin/true
+	EOF
+
+	put_block /etc/aliases <<-EOF
+	${PREFIX}alice: ${PREFIX}alice@example.org
+	${PREFIX}team: ${PREFIX}alice, ${PREFIX}bob
+	EOF
+	if command -v newaliases >/dev/null; then newaliases || true; fi
+
+	put_block /etc/security/limits.conf <<-EOF
+	${PREFIX}bob soft nofile 4096
+	EOF
+	put_file /etc/security/limits.d/${PREFIX}frank.conf <<-EOF
+	# $MARKER
+	${PREFIX}frank hard nproc 50
+	EOF
+
+	# sudoers: geteilte Datei (Alias mit zwei Nutzern) und eine Regel fuer
+	# den geloeschten Nutzer erin (wuerde ein neuer erin erben)
+	put_file /etc/sudoers.d/${PREFIX}team 0440 <<-EOF
+	# $MARKER
+	User_Alias UCT_TEAM = ${PREFIX}alice, ${PREFIX}bob
+	UCT_TEAM ALL=(root) NOPASSWD: /usr/bin/true
+	EOF
+	put_file /etc/sudoers.d/${PREFIX}erin 0440 <<-EOF
+	# $MARKER - Nutzer existiert nicht (Problemfall)
+	${PREFIX}erin ALL=(ALL) NOPASSWD: /usr/bin/true
+	EOF
+	if command -v visudo >/dev/null; then
+		visudo -c >/dev/null || die "sudoers ungueltig"
+	fi
+
+	# sshd: Drop-in nur fuer frank, Match-Block fuer bob am Ende der
+	# Hauptdatei (dort wirkt er nur auf bob). Kein AllowUsers, das wuerde
+	# alle anderen aussperren. Ungueltige Konfiguration wird zurueckgenommen.
+	if [ -f /etc/ssh/sshd_config ]; then
+		put_file /etc/ssh/sshd_config.d/${PREFIX}frank.conf <<-EOF
+		# $MARKER
+		DenyUsers ${PREFIX}frank
+		EOF
+		put_block /etc/ssh/sshd_config <<-EOF
+		Match User ${PREFIX}bob
+		    X11Forwarding no
+		EOF
+		if command -v sshd >/dev/null && ! sshd -t; then
+			remove_block /etc/ssh/sshd_config
+			rm -f /etc/ssh/sshd_config.d/${PREFIX}frank.conf
+			die "sshd-Konfiguration ungueltig, Aenderungen zurueckgenommen"
+		fi
+	fi
+
+	# systemd: Timer fuer bobs Dienst, root-Dienst mit Dateien aus alices
+	# Home, Drop-in fuer einen Hersteller-Dienst, User-Unit mit linger fuer
+	# web und ein linger-Eintrag fuer den geloeschten erin
+	put_file /etc/systemd/system/${PREFIX}bob-app.timer <<-EOF
+	# $MARKER
+	[Timer]
+	OnCalendar=hourly
+	Unit=${PREFIX}bob-app.service
+	EOF
+	put_file /etc/systemd/system/${PREFIX}alice-export.service <<-EOF
+	# $MARKER - laeuft als root, nutzt aber alices Home
+	[Service]
+	Type=oneshot
+	WorkingDirectory=/home/${PREFIX}alice
+	ExecStart=/usr/bin/true
+	EOF
+	# EnvironmentFile mit "-" ist optional; die Datei existiert nicht
+	make_dir /etc/systemd/system/logrotate.service.d
+	put_file /etc/systemd/system/logrotate.service.d/${PREFIX}alice.conf <<-EOF
+	# $MARKER
+	[Service]
+	EnvironmentFile=-/home/${PREFIX}alice/.logrotate-env
+	EOF
+
+	local wh=/home/${PREFIX}web
+	mkdir -p $wh/.config/systemd/user
+	cat >$wh/.config/systemd/user/${PREFIX}web-worker.service <<-EOF
+	# $MARKER
+	[Service]
+	ExecStart=/usr/bin/sleep infinity
+	EOF
+	chown -R ${PREFIX}web:${PREFIX}web $wh/.config
+	if have_systemd && command -v loginctl >/dev/null; then
+		loginctl enable-linger ${PREFIX}web && record linger ${PREFIX}web
+		mkdir -p /var/lib/systemd/linger
+		put_file /var/lib/systemd/linger/${PREFIX}erin </dev/null
+	fi
+	if have_systemd; then systemctl daemon-reload; fi
+}
+
 put_file_hosts() {
 	local names="" u
 	for u in alice bob frank web webadmin gina erin dave; do
@@ -441,6 +561,7 @@ cmd_setup() {
 	setup_apache
 	setup_caddy
 	setup_misc
+	setup_etc_refs
 	if [ "$SERVICE_FAILED" = 1 ]; then
 		warn "Aufbau fertig, aber mindestens ein Dienst laeuft nicht (siehe oben)"
 		exit 1
@@ -475,8 +596,11 @@ cmd_teardown() {
 			replaced)
 				cp -a "$ORIG_DIR$path" "$path" && log "Original wiederhergestellt: $path" ;;
 			hostsline) sed -i "/# $MARKER\$/d" "$path" ;;
+			block) remove_block "$path" ;;
+			linger) loginctl disable-linger "$path" 2>/dev/null || true ;;
 		esac
 	done <"$MANIFEST"
+	if command -v newaliases >/dev/null; then newaliases 2>/dev/null || true; fi
 
 	if have_systemd; then systemctl daemon-reload || true; fi
 	local ver
@@ -503,7 +627,7 @@ cmd_teardown() {
 		case $type in
 			home|dir)
 				case $path in
-					/home/${PREFIX}*|/var/www/*|/var/log/${PREFIX}*|/etc/caddy/sites.d)
+					/home/${PREFIX}*|/var/www/*|/var/log/${PREFIX}*|/etc/caddy/sites.d|/etc/systemd/system/logrotate.service.d)
 						rm -rf -- "$path" ;;
 					*) warn "uebersprungen (unerwarteter Pfad): $path" ;;
 				esac ;;

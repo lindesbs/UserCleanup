@@ -35,6 +35,23 @@ Port 8080 (oder dem mit `--caddy-port` gewählten).
 | Teilstring | `uct-web`, `uct-webadmin` | Namen und Pfade, die sich als Teilstring überschneiden; `uct-webadmin` nutzt den Pool von `uct-web`, `uct-web` hat Seiten in Apache und Caddy |
 | Home im Webroot | `uct-gina` | Home ist `/var/www/uct-gina` (`userdel -r` wäre hier gefährlich) |
 
+Dazu kommen Einträge, die UserCleanup Zeile für Zeile auswertet:
+
+| Wo | Was |
+|---|---|
+| `/etc/crontab` | Job von `uct-alice` und vom gelöschten `uct-erin` |
+| `/etc/aliases` | Alias `uct-alice` und `uct-team` (alice, bob) |
+| `/etc/security/limits.conf`, `limits.d/uct-frank.conf` | Limit für bob in der gemeinsamen Datei, eigene Datei für frank |
+| `/etc/sudoers.d/uct-team`, `uct-erin` | `User_Alias` mit alice und bob, Regel für den gelöschten erin |
+| `/etc/ssh/sshd_config`, `sshd_config.d/uct-frank.conf` | `Match User uct-bob` am Dateiende, `DenyUsers uct-frank` |
+| systemd | Timer `uct-bob-app.timer`, root-Dienst `uct-alice-export.service` mit alices Home, Drop-in `logrotate.service.d/uct-alice.conf` |
+| systemd user | User-Unit in `/home/uct-web/.config/systemd/user` mit linger, linger-Datei für den gelöschten erin |
+
+In gemeinsam genutzten Dateien stehen die Zeilen zwischen `# BEGIN usercleanup-testenv`
+und `# END usercleanup-testenv`; `teardown` entfernt genau diesen Block. Die
+sshd-Änderung wird mit `sshd -t` geprüft und bei Fehlern zurückgenommen, sshd wird
+nicht neu geladen.
+
 Jedes Home bekommt eine `.ssh/authorized_keys` und eine `.env` mit Dummy-Passwort,
 damit sich prüfen lässt, ob Backups solche Dateien mit sicheren Rechten ablegen.
 
