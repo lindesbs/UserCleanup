@@ -284,6 +284,8 @@ func TestPlanWithServices(t *testing.T) {
 		// the pool is also used by webmaster's site, so it stays
 		"pool [web] is also used by apache php.master.example.org (webmaster)",
 		"# php-fpm8.2 -t\n# systemctl reload php8.2-fpm\n",
+		"BLOCKER: PHP-FPM pools of web are still used by other sites",
+		"exit 1\n",
 		"systemctl disable --now 'web-app.service'\nrm -- " + q("systemd/system/web-app.service") + "\nsystemctl daemon-reload\n",
 		"rm -- " + q("logrotate.d/web") + "\nlogrotate -d " + q("logrotate.conf") + " >/dev/null 2>&1 || echo",
 	} {
@@ -292,7 +294,7 @@ func TestPlanWithServices(t *testing.T) {
 		}
 	}
 	if strings.Index(script, "systemctl reload apache2") > strings.Index(script, "systemctl reload php8.2-fpm") ||
-		strings.Index(script, "systemctl reload php8.2-fpm") > strings.Index(script, "userdel") {
+		strings.Index(script, "systemctl reload php8.2-fpm") > strings.Index(script, "\nuserdel ") {
 		t.Errorf("wrong order: web servers, then PHP-FPM, then userdel:\n%s", script)
 	}
 	if strings.Contains(script, "rm -- '"+filepath.Join(etcDir, "apache2/sites-available/master")) || strings.Contains(script, "ghost") {

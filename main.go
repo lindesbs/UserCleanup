@@ -70,7 +70,7 @@ func printUserInfo(user *User, data UserData) {
 			if !site.Enabled {
 				state = "disabled"
 			}
-			fmt.Printf("  - %s %s (%s)\n", site.Server, strings.Join(site.Names, " "), state)
+			fmt.Printf("  - %s (%s)\n", siteLabel(site), state)
 			if site.Root != "" {
 				fmt.Printf("      root: %s\n", site.Root)
 			}
@@ -102,6 +102,12 @@ func printUserInfo(user *User, data UserData) {
 		}
 	}
 	if len(data.Units) > 0 {
+		for _, unit := range data.Units {
+			if unit.Enabled {
+				color.New(color.FgYellow).Println("Runs enabled services: check before removing this user")
+				break
+			}
+		}
 		fmt.Println("systemd units:")
 		for _, unit := range data.Units {
 			state := "disabled"
@@ -158,7 +164,7 @@ func printUnownedSites(sites []*Site) {
 		if !site.Enabled {
 			state = "disabled"
 		}
-		fmt.Printf("  - %s %s (%s)\n", site.Server, strings.Join(site.Names, " "), state)
+		fmt.Printf("  - %s (%s)\n", siteLabel(site), state)
 		if site.Root != "" {
 			fmt.Printf("      root: %s\n", site.Root)
 		}

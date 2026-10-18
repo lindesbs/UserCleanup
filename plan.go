@@ -165,6 +165,29 @@ func buildDeletePlan(user *User, inv *Inventory, archivePath string, manifest *M
 
 	data := inv.For(user.Username)
 
+	// A pool that stays because other sites use it still runs as this
+	// user; after userdel php-fpm would refuse to start, taking down all
+	// PHP sites. The script must not run until the admin resolved that.
+	var blockers []*Pool
+	for _, pool := range data.Pools {
+		if len(pool.UsedBy) > 0 {
+			blockers = append(blockers, pool)
+		}
+	}
+	if len(blockers) > 0 {
+		section("BLOCKER: PHP-FPM pools of %s are still used by other sites", user.Username)
+		for _, pool := range blockers {
+			line("#    %s lines %d-%d: pool [%s] runs as %s and is used by %s.", shellQuote(pool.File),
+				pool.Line, pool.EndLine, pool.Name, pool.User, strings.Join(pool.UsedBy, ", "))
+		}
+		line("#    After userdel php-fpm would no longer start. First change user, group")
+		line("#    and paths (error_log, open_basedir, chdir) of these pools to the other")
+		line("#    user, or move those sites to another pool. Then delete these lines.")
+		line("echo \"Blocked: PHP-FPM pool still used by other sites, see step %d\" >&2", step)
+		line("exit 1")
+		line("")
+	}
+
 	// Configs go first: a PHP-FPM pool or vhost of a deleted user stops
 	// the whole service on its next reload.
 	for _, svc := range configChanges(user.Username, inv) {

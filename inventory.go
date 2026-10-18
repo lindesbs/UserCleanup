@@ -334,9 +334,9 @@ func (inv *Inventory) UnownedSites() []*Site {
 // siteLabel names a site for messages
 func siteLabel(site *Site) string {
 	if len(site.Names) > 0 {
-		return site.Server + " " + site.Names[0]
+		return site.Server + " " + strings.Join(site.Names, " ")
 	}
-	return site.Server + " " + site.File
+	return site.Server + " " + filepath.Base(site.File) + " (no server name)"
 }
 
 func overlaps(a, b []string) bool {
