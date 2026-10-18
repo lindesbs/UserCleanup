@@ -58,8 +58,14 @@ put_file() {
 		record replaced "$path"
 	fi
 	mkdir -p "$(dirname "$path")"
-	cat >"$path"
-	chmod "$mode" "$path"
+	# Ueber eine Temp-Datei ersetzen: Mit fs.protected_regular=2 darf selbst
+	# root eine fremde Datei in einem Sticky-Verzeichnis (z. B. Crontabs)
+	# nicht mit O_CREAT oeffnen, ein rename darueber ist aber erlaubt.
+	local tmp
+	tmp=$(mktemp "$(dirname "$path")/.testenv.XXXXXX")
+	cat >"$tmp"
+	chmod "$mode" "$tmp"
+	mv -f "$tmp" "$path"
 	grep -qxF "replaced $path" "$MANIFEST" || record file "$path"
 }
 
