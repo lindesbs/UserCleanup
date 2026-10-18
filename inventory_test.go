@@ -15,8 +15,8 @@ func setupServices(t *testing.T) {
 	// Without the user "shared" from setupFS, so web's home is its own
 	write(t, passwdFile, "root:x:0:0:root:/root:/bin/bash\n"+
 		"www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin\n"+
-		"web:x:1000:1000::"+filepath.Join(homeDir, "web")+":/usr/sbin/nologin\n"+
-		"webmaster:x:1001:1001::"+filepath.Join(homeDir, "webmaster")+":/bin/bash\n")
+		"web:x:61000:61000::"+filepath.Join(homeDir, "web")+":/usr/sbin/nologin\n"+
+		"webmaster:x:61001:61001::"+filepath.Join(homeDir, "webmaster")+":/bin/bash\n")
 	webHome := filepath.Join(homeDir, "web")
 	masterHome := filepath.Join(homeDir, "webmaster")
 	for _, dir := range []string{webHome + "/public", masterHome + "/public", filepath.Join(homeDir, "ghost")} {
@@ -315,13 +315,13 @@ func TestWebrootOwnedByUID(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// webmaster (UID 1001) owns the site directory, web (1000) its log dir
+	// webmaster (UID 61001) owns the site directory, web (61000) its log dir
 	for _, dir := range []string{site, site + "/htdocs"} {
-		if err := os.Chown(dir, 1001, 1001); err != nil {
+		if err := os.Chown(dir, 61001, 61001); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := os.Chown(filepath.Join(root, "var/log/web"), 1000, 1000); err != nil {
+	if err := os.Chown(filepath.Join(root, "var/log/web"), 61000, 61000); err != nil {
 		t.Fatal(err)
 	}
 	write(t, filepath.Join(etcDir, "apache2/sites-available/admin.conf"), `<VirtualHost *:80>
