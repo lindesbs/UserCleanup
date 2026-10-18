@@ -9,17 +9,20 @@ systemd-Unit, dazu bewusst eingebaute Problemfälle.
 sudo ./testenv/testenv.sh setup                 # Pakete installieren und alles anlegen
 sudo ./testenv/testenv.sh setup --no-install    # nur Configs/Nutzer, keine Pakete
 sudo ./testenv/testenv.sh setup --with-broken-pool   # zusätzlich defekter PHP-Pool
+sudo ./testenv/testenv.sh setup --caddy-port 8088    # Caddy auf anderem Port (Standard 8080)
 sudo ./testenv/testenv.sh status                # Übersicht
 sudo ./testenv/testenv.sh teardown              # alles wieder entfernen
 ```
 
-Das Skript ist idempotent, `setup` kann also mehrfach laufen.
+Das Skript ist idempotent, `setup` kann also mehrfach laufen. Ist der Caddy-Port
+schon von einem anderen Dienst belegt, bricht `setup` vor dem Aufbau ab. Startet
+ein Dienst nach dem Aufbau nicht, endet `setup` mit Exit-Code 1.
 
 ## Was angelegt wird
 
 Alle Objekte beginnen mit `uct-`, Testdomains enden auf `.uct.test` und werden
 per `/etc/hosts` auf 127.0.0.1 gelegt. Apache läuft auf Port 80, Caddy auf
-Port 8080.
+Port 8080 (oder dem mit `--caddy-port` gewählten).
 
 | Fall | Nutzer | Was es testet |
 |---|---|---|
@@ -49,4 +52,5 @@ her. Installierte Pakete bleiben. Schlägt etwas fehl, bleibt das Manifest
 erhalten und `teardown` kann erneut laufen.
 
 Getestet auf Ubuntu 24.04 (Container ohne systemd: Aufbau, Wiederholung,
-Seitenaufrufe über Apache und Caddy, Abbau ohne Rückstände).
+Seitenaufrufe über Apache und Caddy, Abbau ohne Rückstände) und auf Debian 12
+arm64 mit systemd (Apache und PHP-FPM 8.2 laufen, alle Apache-Seiten antworten).

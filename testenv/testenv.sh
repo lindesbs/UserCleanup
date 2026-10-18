@@ -6,7 +6,7 @@
 #
 # NUR AUF WEGWERF-TESTSERVERN AUSFUEHREN.
 #
-#   sudo ./testenv.sh setup     [--no-install] [--with-broken-pool]
+#   sudo ./testenv.sh setup     [--no-install] [--with-broken-pool] [--caddy-port N]
 #   sudo ./testenv.sh status
 #   sudo ./testenv.sh teardown
 #
@@ -26,6 +26,8 @@ ORPHAN_UID=4711                # UID ohne passwd-Eintrag (verwaistes Home)
 
 INSTALL=1
 BROKEN_POOL=0
+CADDY_PORT=${CADDY_PORT:-8080}
+SERVICE_FAILED=0
 
 log()  { printf '\033[1;34m==>\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }
@@ -103,7 +105,10 @@ reload_service() {
 		return 0
 	fi
 	systemctl list-unit-files "$svc.service" >/dev/null 2>&1 || return 0
-	systemctl restart "$svc" || warn "$svc konnte nicht neu gestartet werden"
+	if ! systemctl restart "$svc"; then
+		warn "$svc konnte nicht neu gestartet werden (journalctl -u $svc)"
+		SERVICE_FAILED=1
+	fi
 }
 
 # --- Setup -----------------------------------------------------------------
@@ -113,7 +118,7 @@ install_packages() {
 	export DEBIAN_FRONTEND=noninteractive
 	apt-get update -qq
 	# caddy belegt nach der Installation Port 80 wie Apache; das Caddyfile
-	# wird weiter unten auf Port 8080 umgestellt.
+	# wird weiter unten auf $CADDY_PORT umgestellt.
 	apt-get install -y -qq apache2 caddy php-fpm logrotate cron sudo >/dev/null \
 		|| die "Paketinstallation fehlgeschlagen"
 }
@@ -284,7 +289,7 @@ setup_apache() {
 
 setup_caddy() {
 	[ -d /etc/caddy ] || { warn "kein Caddy gefunden, uebersprungen"; return 0; }
-	log "Lege Caddy-Sites an (Port 8080, damit Apache Port 80 behaelt)"
+	log "Lege Caddy-Sites an (Port $CADDY_PORT, damit Apache Port 80 behaelt)"
 	put_file /etc/caddy/Caddyfile <<-EOF
 	# $MARKER - Original liegt in $ORIG_DIR/etc/caddy/Caddyfile
 	{
@@ -295,7 +300,7 @@ setup_caddy() {
 	make_dir /etc/caddy/sites.d
 	put_file /etc/caddy/sites.d/${PREFIX}bob.caddy <<-EOF
 	# $MARKER
-	http://bob.$DOMAIN:8080, http://www.bob.$DOMAIN:8080 {
+	http://bob.$DOMAIN:$CADDY_PORT, http://www.bob.$DOMAIN:$CADDY_PORT {
 	    root * /var/www/bob.$DOMAIN
 	    php_fastcgi unix//run/php/${PREFIX}bob.sock
 	    file_server
@@ -307,7 +312,7 @@ setup_caddy() {
 	# web zusaetzlich auch unter Caddy (Nutzer mit Seiten in zwei Webservern)
 	put_file /etc/caddy/sites.d/${PREFIX}web.caddy <<-EOF
 	# $MARKER
-	http://web.$DOMAIN:8080 {
+	http://web.$DOMAIN:$CADDY_PORT {
 	    root * /var/www/web.$DOMAIN
 	    php_fastcgi unix//run/php/${PREFIX}web.sock
 	    file_server
@@ -316,7 +321,7 @@ setup_caddy() {
 	# erin: Site auf nicht vorhandenes Verzeichnis
 	put_file /etc/caddy/sites.d/${PREFIX}erin.caddy <<-EOF
 	# $MARKER - Webroot existiert nicht (Problemfall)
-	http://erin.$DOMAIN:8080 {
+	http://erin.$DOMAIN:$CADDY_PORT {
 	    root * /var/www/erin.$DOMAIN
 	    file_server
 	}
@@ -324,7 +329,7 @@ setup_caddy() {
 	# Reverse-Proxy auf einen Dienst von bob
 	put_file /etc/caddy/sites.d/${PREFIX}bob-app.caddy <<-EOF
 	# $MARKER
-	http://app.bob.$DOMAIN:8080 {
+	http://app.bob.$DOMAIN:$CADDY_PORT {
 	    reverse_proxy 127.0.0.1:9101
 	}
 	EOF
@@ -407,7 +412,19 @@ put_file_hosts() {
 	record hostsline /etc/hosts
 }
 
+# Bricht ab, wenn CADDY_PORT von einem anderen Dienst als Caddy belegt ist.
+check_caddy_port() {
+	command -v ss >/dev/null || return 0
+	local users
+	users=$(ss -Hltnp "sport = :$CADDY_PORT" 2>/dev/null) || return 0
+	[ -n "$users" ] || return 0
+	echo "$users" | grep -q '"caddy"' && return 0
+	die "Port $CADDY_PORT ist schon belegt: $users
+       Anderen Port waehlen, z. B. --caddy-port 8088"
+}
+
 cmd_setup() {
+	check_caddy_port
 	mkdir -p "$STATE_DIR" "$ORIG_DIR"
 	chmod 700 "$STATE_DIR"
 	touch "$MANIFEST"
@@ -418,7 +435,11 @@ cmd_setup() {
 	setup_apache
 	setup_caddy
 	setup_misc
-	log "Fertig. Uebersicht: $0 status"
+	if [ "$SERVICE_FAILED" = 1 ]; then
+		warn "Aufbau fertig, aber mindestens ein Dienst laeuft nicht (siehe oben)"
+		exit 1
+	fi
+	log "Fertig (Caddy auf Port $CADDY_PORT). Uebersicht: $0 status"
 }
 
 # --- Teardown --------------------------------------------------------------
@@ -529,12 +550,16 @@ while [ $# -gt 0 ]; do
 	case $1 in
 		--no-install) INSTALL=0 ;;
 		--with-broken-pool) BROKEN_POOL=1 ;;
+		--caddy-port)
+			[ $# -ge 2 ] || die "--caddy-port braucht eine Portnummer"
+			CADDY_PORT=$2; shift ;;
 		-h|--help) usage ;;
 		*) die "unbekannte Option: $1" ;;
 	esac
 	shift
 done
 
+case $CADDY_PORT in ''|*[!0-9]*) die "ungueltiger Port: $CADDY_PORT" ;; esac
 [ "$(id -u)" = 0 ] || die "bitte als root ausfuehren (sudo)"
 [ -f /etc/debian_version ] || die "nur fuer Debian/Ubuntu gedacht"
 
