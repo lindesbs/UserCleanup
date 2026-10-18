@@ -3,7 +3,6 @@ package main
 import (
 	"archive/tar"
 	"compress/gzip"
-	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -15,7 +14,7 @@ import (
 func setupFS(t *testing.T) string {
 	t.Helper()
 	root := t.TempDir()
-	dirs := map[string]*string{"home": &homeDir, "etc": &etcDir, "cron": &cronDir, "mail": &mailDir, "sbin": &sbinDir}
+	dirs := map[string]*string{"home": &homeDir, "etc": &etcDir, "cron": &cronDir, "mail": &mailDir}
 	for name, ptr := range dirs {
 		old := *ptr
 		*ptr = filepath.Join(root, name)
@@ -24,14 +23,13 @@ func setupFS(t *testing.T) string {
 			t.Fatal(err)
 		}
 	}
-	oldPasswd, oldAccounts, oldRoot, oldLook := passwdFile, accountFiles, requireRoot, lookPath
+	oldPasswd, oldAccounts, oldRoot := passwdFile, accountFiles, requireRoot
 	t.Cleanup(func() {
-		passwdFile, accountFiles, requireRoot, lookPath = oldPasswd, oldAccounts, oldRoot, oldLook
+		passwdFile, accountFiles, requireRoot = oldPasswd, oldAccounts, oldRoot
 	})
 	passwdFile = filepath.Join(etcDir, "passwd")
 	accountFiles = []string{passwdFile, filepath.Join(etcDir, "shadow"), filepath.Join(etcDir, "group")}
 	requireRoot = false
-	lookPath = func(string) (string, error) { return "", errors.New("not found") }
 
 	write(t, passwdFile, "root:x:0:0:root:/root:/bin/bash\n"+
 		"www-data:x:33:33:www-data:/var/www:/usr/sbin/nologin\n"+
@@ -101,7 +99,7 @@ func TestProtectedUsers(t *testing.T) {
 	if reason := isProtected(users["web"]); reason != "" {
 		t.Errorf("web should not be protected: %s", reason)
 	}
-	if _, err := buildDeletePlan(users["www-data"], users, "/x.tar.gz", &Manifest{Username: "www-data"}); err == nil {
+	if _, err := buildDeletePlan(users["www-data"], collectInventory(users), "/x.tar.gz", &Manifest{Username: "www-data"}); err == nil {
 		t.Error("plan for www-data should be refused")
 	}
 }
@@ -128,9 +126,8 @@ func TestBackupAndPlan(t *testing.T) {
 	if err := os.Symlink("/etc/hostname", filepath.Join(home, "link")); err != nil {
 		t.Fatal(err)
 	}
-	write(t, filepath.Join(etcDir, "php/8.2/fpm/pool.d/web.conf"), "user = web\n")
+	write(t, filepath.Join(etcDir, "php/8.2/fpm/pool.d/web.conf"), "[web]\nuser = web\nlisten = /run/php/web.sock\n")
 	write(t, filepath.Join(cronDir, "web"), "* * * * * true\n")
-	write(t, filepath.Join(sbinDir, "php-fpm8.2"), "")
 
 	users, _ := readPasswdFile(true)
 	user := users["web"]
@@ -187,7 +184,7 @@ func TestBackupAndPlan(t *testing.T) {
 		t.Errorf("latestBackup(we) = %s, want none", latest)
 	}
 
-	script, err := buildDeletePlan(user, users, archive, manifest)
+	script, err := buildDeletePlan(user, collectInventory(users), archive, manifest)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,8 +192,7 @@ func TestBackupAndPlan(t *testing.T) {
 		"sha256sum -c",
 		"pkill -KILL -u 'web'",
 		"crontab -r -u 'web'",
-		"# rm -- '" + filepath.Join(etcDir, "php/8.2/fpm/pool.d/web.conf") + "'",
-		"php-fpm8.2' -t",
+		"\nrm -- '" + filepath.Join(etcDir, "php/8.2/fpm/pool.d/web.conf") + "'\nphp-fpm8.2 -t\nsystemctl reload php8.2-fpm\n",
 		"userdel 'web'\n",
 		// home is shared with user "shared", so it must stay commented
 		"# rm -rf -- '" + home + "'",
@@ -214,14 +210,14 @@ func TestPlanRemovesOwnHome(t *testing.T) {
 	setupFS(t)
 	users, _ := readPasswdFile(true)
 	user := users["webmaster"]
-	script, err := buildDeletePlan(user, users, "/var/backups/usercleanup/webmaster-20261018-090000.tar.gz", &Manifest{Username: "webmaster"})
+	script, err := buildDeletePlan(user, collectInventory(users), "/var/backups/usercleanup/webmaster-20261018-090000.tar.gz", &Manifest{Username: "webmaster"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(script, "\nrm -rf -- '"+filepath.Join(homeDir, "webmaster")+"'\n") {
 		t.Errorf("plan should remove own home:\n%s", script)
 	}
-	if _, err := buildDeletePlan(user, users, "/x.tar.gz", &Manifest{Username: "web"}); err == nil {
+	if _, err := buildDeletePlan(user, collectInventory(users), "/x.tar.gz", &Manifest{Username: "web"}); err == nil {
 		t.Error("backup of another user must be rejected")
 	}
 }

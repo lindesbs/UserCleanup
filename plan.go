@@ -3,50 +3,119 @@ package main
 import (
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
-
-// configCheck is a read-only syntax check for a service configuration
-type configCheck struct {
-	binary  string
-	command string
-}
-
-var configChecks = []configCheck{
-	{"apache2ctl", "apache2ctl configtest"},
-	{"nginx", "nginx -t"},
-	{"caddy", "caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile"},
-}
-
-// lookPath is replaceable in tests
-var lookPath = exec.LookPath
 
 // shellQuote quotes a string for POSIX sh
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
-// availableConfigChecks returns the check commands for the services installed
-func availableConfigChecks() []string {
-	var checks []string
-	for _, check := range configChecks {
-		if _, err := lookPath(check.binary); err == nil {
-			checks = append(checks, check.command)
+// serviceChanges collects the commands for one service
+type serviceChanges struct {
+	title  string
+	test   string
+	reload string
+	live   []string // commands for files that only belong to the user
+	manual []string // comments for blocks in shared files
+}
+
+// serviceFor returns the key and an empty change set for a config block
+func serviceFor(kind, version string) (string, *serviceChanges) {
+	switch kind {
+	case "apache":
+		return kind, &serviceChanges{title: "Apache", test: "apache2ctl configtest", reload: "systemctl reload apache2"}
+	case "nginx":
+		return kind, &serviceChanges{title: "nginx", test: "nginx -t", reload: "systemctl reload nginx"}
+	case "caddy":
+		return kind, &serviceChanges{title: "Caddy",
+			test:   "caddy validate --config " + shellQuote(filepath.Join(etcDir, "caddy", "Caddyfile")) + " --adapter caddyfile",
+			reload: "systemctl reload caddy"}
+	case "php":
+		if version == "" {
+			return "php", &serviceChanges{title: "PHP-FPM", test: "php-fpm -t", reload: "systemctl reload php-fpm"}
 		}
+		return "php" + version, &serviceChanges{title: "PHP-FPM " + version,
+			test: "php-fpm" + version + " -t", reload: "systemctl reload php" + version + "-fpm"}
+	default:
+		conf := shellQuote(filepath.Join(etcDir, "logrotate.conf"))
+		return "logrotate", &serviceChanges{title: "logrotate",
+			test: "logrotate -d " + conf + " >/dev/null 2>&1 || { echo \"check failed: logrotate -d " +
+				strings.ReplaceAll(conf, "'", "") + "\" >&2; exit 1; }"}
 	}
-	fpms, _ := filepath.Glob(filepath.Join(sbinDir, "php-fpm*"))
-	for _, fpm := range fpms {
-		checks = append(checks, shellQuote(fpm)+" -t")
+}
+
+// configChanges builds the per service commands to remove the user's
+// sites, pools and logrotate entries
+func configChanges(username string, inv *Inventory) []*serviceChanges {
+	services := make(map[string]*serviceChanges)
+	var order []string
+	done := make(map[string]bool)
+
+	add := func(kind, version, file string, line, endLine int, what string, link string) {
+		key, fresh := serviceFor(kind, version)
+		svc := services[key]
+		if svc == nil {
+			svc = fresh
+			services[key] = svc
+			order = append(order, key)
+		}
+		if inv.dedicated(file, username) {
+			if done[file] {
+				return
+			}
+			done[file] = true
+			if link != "" {
+				svc.live = append(svc.live, "rm -- "+shellQuote(link))
+			}
+			svc.live = append(svc.live, "rm -- "+shellQuote(file))
+			return
+		}
+		svc.manual = append(svc.manual, fmt.Sprintf("# %s lines %d-%d: %s (file is shared, remove this block by hand)",
+			shellQuote(file), line, endLine, what))
 	}
-	return checks
+
+	data := inv.For(username)
+	for _, pool := range data.Pools {
+		add("php", pool.Version, pool.File, pool.Line, pool.EndLine, "pool ["+pool.Name+"]", "")
+	}
+	for _, site := range data.Sites {
+		what := "site"
+		if len(site.Names) > 0 {
+			what += " " + strings.Join(site.Names, " ")
+		}
+		add(site.Server, "", site.File, site.Line, site.EndLine, what, site.EnabledLink)
+	}
+	for _, entry := range data.Logrotate {
+		add("logrotate", "", entry.File, entry.Line, entry.EndLine, strings.Join(entry.Paths, " "), "")
+	}
+
+	sort.SliceStable(order, func(i, j int) bool {
+		// web servers first, so no site points to a removed pool
+		rank := func(key string) int {
+			switch {
+			case key == "apache" || key == "nginx" || key == "caddy":
+				return 0
+			case strings.HasPrefix(key, "php"):
+				return 1
+			}
+			return 2
+		}
+		return rank(order[i]) < rank(order[j])
+	})
+	result := make([]*serviceChanges, 0, len(order))
+	for _, key := range order {
+		result = append(result, services[key])
+	}
+	return result
 }
 
 // buildDeletePlan returns a shell script with the commands to remove a
 // user. Nothing is executed: the administrator reviews and runs it.
-func buildDeletePlan(user *User, users map[string]*User, archivePath string, manifest *Manifest) (string, error) {
+func buildDeletePlan(user *User, inv *Inventory, archivePath string, manifest *Manifest) (string, error) {
 	if reason := isProtected(user); reason != "" {
 		return "", fmt.Errorf("refusing to generate delete commands: %s", reason)
 	}
@@ -83,6 +152,47 @@ func buildDeletePlan(user *User, users map[string]*User, archivePath string, man
 		shellQuote(strings.TrimSuffix(filepath.Base(archivePath), ".tar.gz")+".sha256"))
 	line("")
 
+	// Configs go first: a PHP-FPM pool or vhost of a deleted user stops
+	// the whole service on its next reload.
+	for _, svc := range configChanges(user.Username, inv) {
+		section("%s configuration", svc.title)
+		for _, cmd := range svc.manual {
+			line("%s", cmd)
+		}
+		for _, cmd := range svc.live {
+			line("%s", cmd)
+		}
+		prefix := ""
+		if len(svc.live) == 0 {
+			prefix = "# "
+		}
+		line("%s%s", prefix, svc.test)
+		if svc.reload != "" {
+			line("%s%s", prefix, svc.reload)
+		}
+		line("")
+	}
+
+	known := make(map[string]bool)
+	for _, file := range inv.For(user.Username).Files() {
+		known[file] = true
+	}
+	var others []string
+	for _, config := range user.Configs {
+		if !known[config] {
+			others = append(others, config)
+		}
+	}
+	if len(others) > 0 {
+		section("Other files in %s that mention %s or %s", etcDir, user.Username, user.HomeDir)
+		line("#    Found by text search only, so they may be shared with other users")
+		line("#    or sites. Check each one and edit or remove it by hand.")
+		for _, config := range others {
+			line("# rm -- %s", shellQuote(config))
+		}
+		line("")
+	}
+
 	section("Stop running processes of the user")
 	line("pkill -KILL -u %s || true", u)
 	line("")
@@ -93,31 +203,12 @@ func buildDeletePlan(user *User, users map[string]*User, archivePath string, man
 		line("")
 	}
 
-	section("Configuration files that mention %s or %s", user.Username, user.HomeDir)
-	if len(user.Configs) == 0 {
-		line("#    none found")
-	} else {
-		line("#    Found by text search only, so they may be shared with other users")
-		line("#    or sites. They are commented out on purpose: edit or remove each")
-		line("#    one by hand after checking it.")
-		for _, config := range user.Configs {
-			line("# rm -- %s", shellQuote(config))
-		}
-	}
-	if checks := availableConfigChecks(); len(checks) > 0 {
-		line("#    After changing configurations, check them before any reload:")
-		for _, check := range checks {
-			line("%s", check)
-		}
-	}
-	line("")
-
 	section("Remove the account (passwd, shadow, group entries)")
 	line("userdel %s", u)
 	line("")
 
 	section("Remove the files of the user")
-	if ok, reason := homeIsRemovable(user, users); ok {
+	if ok, reason := homeIsRemovable(user, inv.All); ok {
 		line("rm -rf -- %s", shellQuote(filepath.Clean(user.HomeDir)))
 	} else {
 		line("#    Home directory is not removed automatically: %s", reason)

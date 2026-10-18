@@ -60,8 +60,12 @@ UserCleanup never deletes anything. It creates backups and prints the shell
 commands to remove a user; you review them and run them yourself.
 
 ```bash
-# List all users (with -s also system users) and the files in /etc that mention them
+# List all users (with -s also system users) with their Apache, nginx and
+# Caddy sites, PHP-FPM pools, logrotate entries and other files in /etc that
+# mention them, followed by orphaned or broken entries
 ./UserCleanup list
+./UserCleanup list <username>
+./UserCleanup list --json
 
 # Back up a user (run as root). Writes <user>-<time>.tar.gz with owners and
 # permissions preserved, a .manifest.json (incl. passwd/shadow/group entries)
@@ -84,13 +88,34 @@ tar -xzpf /var/backups/usercleanup/<user>-<time>.tar.gz -C /
 --system-users, -s  # Include system users (UID < 1000) in list
 ```
 
-The generated commands verify the backup checksum, stop the user's
-processes, remove the crontab, call `userdel` and remove the home directory
-only if it is exactly `/home/<user>` and not shared with another user.
-Configuration files found in /etc are listed commented out, because the
-text search can also match files shared with other sites; check and edit
-them by hand, then run the listed config tests (apache2ctl, nginx, caddy,
-php-fpm) before reloading any service.
+### What is collected
+
+| Source | Files | Assigned to a user by |
+|---|---|---|
+| Apache | `/etc/apache2/sites-available`, `sites-enabled`, `/etc/httpd/conf.d` | `SuexecUserGroup`/`AssignUserID`, `DocumentRoot` in the home, PHP-FPM socket of the user's pool |
+| nginx | `/etc/nginx/sites-available`, `sites-enabled`, `conf.d` | `root` in the home, `fastcgi_pass` to the user's pool |
+| Caddy | `/etc/caddy/Caddyfile` and its imports | `root` in the home, `php_fastcgi` to the user's pool |
+| PHP-FPM | `/etc/php/*/fpm/pool.d`, `/etc/php-fpm.d` | `user =` of the pool |
+| logrotate | `/etc/logrotate.conf`, `/etc/logrotate.d` | `su`/`create` user, log path in the home |
+
+Orphaned or broken entries: directories in /home without a user, pools
+running as a missing user or with a missing `chdir`, sites with a missing
+document root, user or PHP-FPM socket, logrotate entries with a missing
+user or log directory.
+
+### The generated commands
+
+1. Verify the backup checksum.
+2. Per service (web servers first, then PHP-FPM, then logrotate): remove
+   config files that only contain blocks of this user (plus the
+   sites-enabled link), then run the config test and reload. Blocks in
+   files shared with other users or sites, and the main Caddyfile, are
+   listed with their line numbers to edit by hand; the test and reload for
+   that service are then commented out too.
+3. Other files in /etc that mention the user (text search), commented out.
+4. Stop the user's processes, remove the crontab, `userdel`, and remove the
+   home directory only if it is exactly `/home/<user>` and not shared with
+   another user.
 
 ## Testing on Debian
 

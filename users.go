@@ -12,14 +12,14 @@ import (
 
 // User represents a user on the system
 type User struct {
-	Username     string
-	UID          int
-	GID          int
-	HomeDir      string
-	Shell        string
-	HasLogin     bool
-	Configs      []string
-	IsSystemUser bool
+	Username     string   `json:"username"`
+	UID          int      `json:"uid"`
+	GID          int      `json:"gid"`
+	HomeDir      string   `json:"home_dir"`
+	Shell        string   `json:"shell"`
+	HasLogin     bool     `json:"has_login"`
+	Configs      []string `json:"configs"`
+	IsSystemUser bool     `json:"system_user"`
 }
 
 // protectedUsers can never be the target of generated delete commands,

@@ -1,9 +1,12 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 
 	"github.com/fatih/color"
 	"github.com/spf13/cobra"
@@ -15,7 +18,6 @@ var (
 	etcDir       = "/etc"
 	cronDir      = "/var/spool/cron/crontabs"
 	mailDir      = "/var/mail"
-	sbinDir      = "/usr/sbin"
 	passwdFile   = "/etc/passwd"
 	accountFiles = []string{
 		"/etc/passwd", "/etc/shadow", "/etc/group",
@@ -25,20 +27,31 @@ var (
 	requireRoot = true
 	dryRun      bool
 	systemUsers bool
+	jsonOutput  bool
 	planOutput  string
 	planBackup  string
 )
 
+// lines returns "file:line-end" for display
+func lines(file string, line, endLine int) string {
+	return fmt.Sprintf("%s:%d-%d", file, line, endLine)
+}
+
 // printUserInfo prints information about a user
-func printUserInfo(user *User) {
+func printUserInfo(user *User, data UserData) {
 	userType := "User"
 	if user.IsSystemUser {
 		userType = "System User"
 	}
+	bold := color.New(color.Bold)
 
-	fmt.Printf("Username: %s (%s)\n", user.Username, userType)
+	bold.Printf("Username: %s (%s)\n", user.Username, userType)
 	fmt.Printf("UID/GID: %d/%d\n", user.UID, user.GID)
-	fmt.Printf("Home Directory: %s\n", user.HomeDir)
+	fmt.Printf("Home Directory: %s", user.HomeDir)
+	if !exists(user.HomeDir) {
+		color.New(color.FgYellow).Print(" (missing)")
+	}
+	fmt.Println()
 	fmt.Printf("Shell: %s\n", user.Shell)
 	fmt.Printf("Login: ")
 	if user.HasLogin {
@@ -50,32 +63,103 @@ func printUserInfo(user *User) {
 		color.New(color.FgRed).Printf("Protected: %s\n", reason)
 	}
 
-	if len(user.Configs) > 0 {
-		fmt.Println("Configuration files:")
-		for _, config := range user.Configs {
+	if len(data.Sites) > 0 {
+		fmt.Println("Sites:")
+		for _, site := range data.Sites {
+			state := "enabled"
+			if !site.Enabled {
+				state = "disabled"
+			}
+			fmt.Printf("  - %s %s (%s)\n", site.Server, strings.Join(site.Names, " "), state)
+			if site.Root != "" {
+				fmt.Printf("      root: %s\n", site.Root)
+			}
+			for _, backend := range site.Backends {
+				fmt.Printf("      php: %s\n", backend)
+			}
+			fmt.Printf("      file: %s\n", lines(site.File, site.Line, site.EndLine))
+		}
+	}
+	if len(data.Pools) > 0 {
+		fmt.Println("PHP-FPM pools:")
+		for _, pool := range data.Pools {
+			fmt.Printf("  - [%s] PHP %s, user %s, listen %s\n", pool.Name, pool.Version, pool.User, pool.Listen)
+			keys := make([]string, 0, len(pool.Settings))
+			for key := range pool.Settings {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				fmt.Printf("      %s = %s\n", key, pool.Settings[key])
+			}
+			fmt.Printf("      file: %s\n", lines(pool.File, pool.Line, pool.EndLine))
+		}
+	}
+	if len(data.Logrotate) > 0 {
+		fmt.Println("Logrotate:")
+		for _, entry := range data.Logrotate {
+			fmt.Printf("  - %s\n", strings.Join(entry.Paths, " "))
+			fmt.Printf("      file: %s\n", lines(entry.File, entry.Line, entry.EndLine))
+		}
+	}
+
+	known := make(map[string]bool)
+	for _, file := range data.Files() {
+		known[file] = true
+	}
+	var others []string
+	for _, config := range user.Configs {
+		if !known[config] {
+			others = append(others, config)
+		}
+	}
+	if len(others) > 0 {
+		fmt.Println("Other files in /etc that mention the user:")
+		for _, config := range others {
 			fmt.Printf("  - %s\n", config)
 		}
-	} else {
-		fmt.Println("No configuration files found")
 	}
 	fmt.Println()
 }
 
-// loadUser reads all users and their configs and returns the named user.
-// All users are loaded so that shared homes can be detected.
-func loadUser(username string) (*User, map[string]*User) {
+// printFindings prints orphaned and broken entries
+func printFindings(findings []Finding) {
+	if len(findings) == 0 {
+		color.New(color.FgGreen).Println("No orphaned or broken entries found")
+		return
+	}
+	color.New(color.FgRed, color.Bold).Printf("Orphaned or broken entries (%d):\n", len(findings))
+	for _, f := range findings {
+		location := f.Path
+		if f.Line > 0 {
+			location = fmt.Sprintf("%s:%d", f.Path, f.Line)
+		}
+		fmt.Printf("  - [%s] %s\n      %s\n", f.Kind, location, f.Detail)
+	}
+}
+
+// loadUser reads all users, the inventory and the user's configs and
+// returns the named user. All users are loaded so that shared homes and
+// shared config files can be detected.
+func loadUser(username string) (*User, *Inventory) {
 	users, err := readPasswdFile(true)
 	if err != nil {
 		fail("Error reading passwd file: %v", err)
 	}
-	user, exists := users[username]
-	if !exists {
+	user, found := users[username]
+	if !found {
 		fail("User %s not found", username)
 	}
 	if err := findUserConfigs(map[string]*User{username: user}); err != nil {
 		fmt.Fprintf(os.Stderr, "Error finding user configurations: %v\n", err)
 	}
-	return user, users
+	inv := collectInventory(users)
+	// Parsed files belong into the backup even if the text search missed them
+	for _, file := range inv.For(username).Files() {
+		user.Configs = appendUnique(user.Configs, file)
+	}
+	sort.Strings(user.Configs)
+	return user, inv
 }
 
 func fail(format string, args ...any) {
@@ -88,27 +172,66 @@ func main() {
 		Use:   "usercleanup",
 		Short: "UserCleanup is a tool to manage and clean up user accounts",
 		Long: `UserCleanup helps system administrators identify and manage user accounts.
-It shows users and the configurations associated with them, creates backups,
-and generates the shell commands to remove a user. It never deletes anything
-itself: the administrator reviews and runs the generated commands.`,
+It shows users with their Apache, nginx and Caddy sites, PHP-FPM pools and
+logrotate entries, finds orphaned entries, creates backups, and generates
+the shell commands to remove a user. It never deletes anything itself: the
+administrator reviews and runs the generated commands.`,
 	}
 
 	var listCmd = &cobra.Command{
-		Use:   "list",
-		Short: "List all users",
+		Use:   "list [username]",
+		Short: "List users with their sites, pools and logrotate entries, and orphaned entries",
+		Args:  cobra.MaximumNArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			users, err := readPasswdFile(systemUsers)
+			all, err := readPasswdFile(true)
 			if err != nil {
 				fail("Error reading passwd file: %v", err)
 			}
+			inv := collectInventory(all)
 
+			users := make(map[string]*User)
+			for name, user := range all {
+				if len(args) == 1 && name != args[0] {
+					continue
+				}
+				if len(args) == 0 && user.IsSystemUser && !systemUsers {
+					continue
+				}
+				users[name] = user
+			}
+			if len(args) == 1 && len(users) == 0 {
+				fail("User %s not found", args[0])
+			}
 			if err := findUserConfigs(users); err != nil {
 				fmt.Fprintf(os.Stderr, "Error finding user configurations: %v\n", err)
 			}
 
+			if jsonOutput {
+				type userJSON struct {
+					*User
+					UserData
+				}
+				out := struct {
+					Users    []userJSON `json:"users"`
+					Findings []Finding  `json:"findings"`
+				}{Findings: inv.Findings}
+				for _, user := range sortedUsers(users) {
+					out.Users = append(out.Users, userJSON{user, inv.For(user.Username)})
+				}
+				enc := json.NewEncoder(os.Stdout)
+				enc.SetIndent("", "  ")
+				if err := enc.Encode(out); err != nil {
+					fail("Error writing JSON: %v", err)
+				}
+				return
+			}
+
 			fmt.Printf("Found %d users\n\n", len(users))
 			for _, user := range sortedUsers(users) {
-				printUserInfo(user)
+				printUserInfo(user, inv.For(user.Username))
+			}
+			if len(args) == 0 {
+				printFindings(inv.Findings)
 			}
 		},
 	}
@@ -121,8 +244,8 @@ plus a .manifest.json (including the account entries) and a .sha256 file,
 into the backup directory. The directory is created with mode 0700.`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			user, users := loadUser(args[0])
-			archive, err := backupUser(user, users, backupDir)
+			user, inv := loadUser(args[0])
+			archive, err := backupUser(user, inv.All, backupDir)
 			if err != nil {
 				fail("Error backing up user: %v", err)
 			}
@@ -142,7 +265,7 @@ must exist (see "backup"); the newest one in the backup directory is used
 unless --backup is given. System and service users are refused.`,
 		Args: cobra.ExactArgs(1),
 		Run: func(cmd *cobra.Command, args []string) {
-			user, users := loadUser(args[0])
+			user, inv := loadUser(args[0])
 			if reason := isProtected(user); reason != "" {
 				fail("Refusing to generate delete commands: %s", reason)
 			}
@@ -168,7 +291,7 @@ unless --backup is given. System and service users are refused.`,
 				fail("Error reading manifest of %s: %v", archive, err)
 			}
 
-			script, err := buildDeletePlan(user, users, archive, manifest)
+			script, err := buildDeletePlan(user, inv, archive, manifest)
 			if err != nil {
 				fail("%v", err)
 			}
@@ -186,6 +309,7 @@ unless --backup is given. System and service users are refused.`,
 
 	rootCmd.PersistentFlags().BoolVarP(&systemUsers, "system-users", "s", false, "Include system users (UID < 1000) in list")
 	rootCmd.PersistentFlags().StringVarP(&backupDir, "backup-dir", "b", backupDir, "Absolute backup directory, outside of any home")
+	listCmd.Flags().BoolVar(&jsonOutput, "json", false, "Print the result as JSON")
 	backupCmd.Flags().BoolVarP(&dryRun, "dry-run", "d", false, "Show what would be backed up without writing anything")
 	planCmd.Flags().StringVarP(&planOutput, "output", "o", "", "Write the commands to this file instead of stdout")
 	planCmd.Flags().StringVar(&planBackup, "backup", "", "Backup archive to reference (default: newest of the user)")
