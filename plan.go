@@ -146,6 +146,37 @@ func configChanges(username string, inv *Inventory) ([]*serviceChanges, map[stri
 	return result, done
 }
 
+// planForUser builds the commands for a user against a backup archive, or
+// against the newest backup of the user if archive is empty. It returns
+// the script and the archive used.
+func planForUser(user *User, inv *Inventory, archive string) (string, string, error) {
+	if reason := isProtected(user); reason != "" {
+		return "", "", fmt.Errorf("refusing to generate delete commands: %s", reason)
+	}
+	if archive != "" {
+		abs, err := filepath.Abs(archive)
+		if err != nil {
+			return "", "", fmt.Errorf("error resolving %s: %v", archive, err)
+		}
+		archive = abs
+	} else {
+		var err error
+		if archive, err = latestBackup(user.Username, backupDir); err != nil {
+			return "", "", fmt.Errorf("error looking for backups: %v", err)
+		}
+		if archive == "" {
+			return "", "", fmt.Errorf("no backup of %s found in %s, run \"usercleanup backup %s\" first",
+				user.Username, backupDir, user.Username)
+		}
+	}
+	manifest, err := readManifest(archive)
+	if err != nil {
+		return "", "", fmt.Errorf("error reading manifest of %s: %v", archive, err)
+	}
+	script, err := buildDeletePlan(user, inv, archive, manifest)
+	return script, archive, err
+}
+
 // buildDeletePlan returns a shell script with the commands to remove a
 // user. Nothing is executed: the administrator reviews and runs it.
 func buildDeletePlan(user *User, inv *Inventory, archivePath string, manifest *Manifest) (string, error) {

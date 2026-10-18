@@ -65,6 +65,10 @@ type ManifestFile struct {
 	Size int64  `json:"size"`
 }
 
+// backupWarnings receives the warnings about entries that were not backed
+// up; the TUI shows them from the manifest instead
+var backupWarnings io.Writer = os.Stdout
+
 // backupTimeFormat is used in archive names and sorts chronologically
 const backupTimeFormat = "20060102-150405"
 
@@ -255,7 +259,7 @@ func backupUser(user *User, users map[string]*User, dir string) (string, error) 
 	}
 
 	for _, skipped := range manifest.Skipped {
-		fmt.Printf("Warning: not backed up: %s\n", skipped)
+		fmt.Fprintf(backupWarnings, "Warning: not backed up: %s\n", skipped)
 	}
 	return archivePath, nil
 }

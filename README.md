@@ -98,6 +98,12 @@ commands to remove a user; you review them and run them yourself.
 ./UserCleanup plan <username> -o remove-<username>.sh   # write to a file
 sh remove-<username>.sh                                 # after reviewing it
 
+# Interactive interface: browse users and their areas (tabs: sites, PHP,
+# MySQL, systemd/cron, /etc, logrotate, dirs), see the findings (f), create
+# a backup (b) and show the generated commands (p) or write them to
+# ./remove-<username>.sh (w, never overwrites a file). Nothing is deleted.
+./UserCleanup tui
+
 # Restore a backup
 tar -xzpf /var/backups/usercleanup/<user>-<time>.tar.gz -C /
 
