@@ -1,4 +1,4 @@
-package main
+package usercleanup
 
 import (
 	"encoding/json"
@@ -289,7 +289,12 @@ func fail(format string, args ...any) {
 	os.Exit(1)
 }
 
-func main() {
+// appVersion is the version passed to Execute, shown by the TUI
+var appVersion = "dev"
+
+// Execute runs the command line interface; version is shown by --version
+func Execute(version string) {
+	appVersion = version
 	var rootCmd = &cobra.Command{
 		Use:   "usercleanup",
 		Short: "UserCleanup is a tool to manage and clean up user accounts",

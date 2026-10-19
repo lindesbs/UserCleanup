@@ -1,7 +1,10 @@
 # Makefile for UserCleanup
 # Provides targets for building, cross-compiling, and cleaning
 
-BINARY := UserCleanup
+BINARY := usercleanup
+PKG    := ./cmd/usercleanup
+BIN    := bin
+DIST   := dist
 VERSION := $(shell cat VERSION)
 LDFLAGS := -ldflags "-s -w -X main.version=$(VERSION)"
 
@@ -11,6 +14,10 @@ DARWIN_ARCHS := amd64 arm64
 LINUX_TARGETS  := $(addprefix linux-,$(LINUX_ARCHS))
 DARWIN_TARGETS := $(addprefix darwin-,$(DARWIN_ARCHS))
 
+# Debian packages are built with nfpm; GOTOOLCHAIN=auto fetches the Go
+# version nfpm needs if the installed one is older
+NFPM := GOTOOLCHAIN=auto go run github.com/goreleaser/nfpm/v2/cmd/nfpm@v2.47.0
+
 # Default target
 .PHONY: all
 all: build
@@ -19,19 +26,22 @@ all: build
 .PHONY: build
 build:
 	@echo "Building $(BINARY) for current platform..."
-	@go build $(LDFLAGS) -o $(BINARY)
+	@mkdir -p $(BIN)
+	@go build $(LDFLAGS) -o $(BIN)/$(BINARY) $(PKG)
 
 # Build for all supported platforms (Linux and macOS)
 .PHONY: release
 release: linux macos
 
-# Cross-compile for Linux (all architectures)
+# Cross-compile for Linux (all architectures). GOARM=7 matches Debian armhf
+# and is ignored for the other architectures.
 .PHONY: linux $(LINUX_TARGETS)
 linux: $(LINUX_TARGETS)
 
 $(LINUX_TARGETS): linux-%:
 	@echo "Building $(BINARY) for Linux ($*)..."
-	@GOOS=linux GOARCH=$* go build $(LDFLAGS) -o $(BINARY)-linux-$*
+	@mkdir -p $(BIN)
+	@GOOS=linux GOARCH=$* GOARM=7 go build $(LDFLAGS) -o $(BIN)/$(BINARY)-linux-$* $(PKG)
 
 # Cross-compile for macOS (Intel and Apple Silicon)
 .PHONY: macos darwin $(DARWIN_TARGETS)
@@ -39,7 +49,8 @@ macos darwin: $(DARWIN_TARGETS)
 
 $(DARWIN_TARGETS): darwin-%:
 	@echo "Building $(BINARY) for macOS ($*)..."
-	@GOOS=darwin GOARCH=$* go build $(LDFLAGS) -o $(BINARY)-darwin-$*
+	@mkdir -p $(BIN)
+	@GOOS=darwin GOARCH=$* go build $(LDFLAGS) -o $(BIN)/$(BINARY)-darwin-$* $(PKG)
 
 # Debian aliases (Debian builds are plain Linux builds)
 .PHONY: debian debian-amd64 debian-386 debian-arm64 debian-arm
@@ -49,15 +60,30 @@ debian-386: linux-386
 debian-arm64: linux-arm64
 debian-arm: linux-arm
 
-# Package release binaries as tar.gz archives with checksums in dist/
+# Build Debian packages for all Linux architectures into $(DIST)/
+# (Debian architecture names: 386 -> i386, arm -> armhf)
+.PHONY: deb
+deb: linux
+	@mkdir -p $(DIST)
+	@for arch in $(LINUX_ARCHS); do \
+		case $$arch in 386) deb=i386 ;; arm) deb=armhf ;; *) deb=$$arch ;; esac; \
+		echo "Packaging $(BINARY)_$(VERSION)_$$deb.deb..."; \
+		mkdir -p $(BIN)/deb && cp $(BIN)/$(BINARY)-linux-$$arch $(BIN)/deb/$(BINARY) || exit 1; \
+		VERSION=$(VERSION) DEB_ARCH=$$deb \
+			$(NFPM) package --config packaging/nfpm.yaml --packager deb --target $(DIST)/ >/dev/null || exit 1; \
+	done
+
+# Package release binaries as tar.gz archives and Debian packages with
+# checksums in $(DIST)/
 .PHONY: dist
 dist: release
-	@echo "Packaging release $(VERSION) into dist/..."
-	@rm -rf dist && mkdir -p dist
-	@for f in $(BINARY)-linux-* $(BINARY)-darwin-*; do \
-		tar -czf dist/$$f-$(VERSION).tar.gz $$f; \
+	@echo "Packaging release $(VERSION) into $(DIST)/..."
+	@rm -rf $(DIST) && mkdir -p $(DIST)
+	@for f in $$(cd $(BIN) && ls $(BINARY)-linux-* $(BINARY)-darwin-*); do \
+		tar -czf $(DIST)/$$f-$(VERSION).tar.gz -C $(BIN) $$f; \
 	done
-	@cd dist && sha256sum *.tar.gz > SHA256SUMS
+	@$(MAKE) --no-print-directory deb
+	@cd $(DIST) && sha256sum *.tar.gz *.deb > SHA256SUMS
 
 # Static checks: formatting and go vet
 .PHONY: lint
@@ -82,7 +108,7 @@ version:
 .PHONY: clean
 clean:
 	@echo "Cleaning build artifacts..."
-	@rm -rf $(BINARY) $(BINARY)-linux-* $(BINARY)-darwin-* dist
+	@rm -rf $(BIN) $(DIST)
 
 # Install dependencies
 .PHONY: deps
@@ -98,8 +124,8 @@ help:
 	@echo ""
 	@echo "Available targets:"
 	@echo "  all          - Build for current platform (default)"
-	@echo "  build        - Build for current platform"
-	@echo "  release      - Build for all Linux and macOS targets"
+	@echo "  build        - Build for current platform into bin/"
+	@echo "  release      - Build for all Linux and macOS targets into bin/"
 	@echo "  linux        - Cross-compile for all Linux architectures"
 	@echo "  linux-amd64  - Cross-compile for Linux (amd64)"
 	@echo "  linux-386    - Cross-compile for Linux (386)"
@@ -109,10 +135,11 @@ help:
 	@echo "  darwin-amd64 - Cross-compile for macOS (Intel)"
 	@echo "  darwin-arm64 - Cross-compile for macOS (Apple Silicon)"
 	@echo "  debian[-*]   - Aliases for the linux targets"
-	@echo "  dist         - Package all release binaries into dist/ (tar.gz + SHA256SUMS)"
+	@echo "  deb          - Build Debian packages for all Linux architectures into dist/"
+	@echo "  dist         - Package all release binaries into dist/ (tar.gz, .deb, SHA256SUMS)"
 	@echo "  lint         - Check gofmt and run go vet"
 	@echo "  test         - Run tests"
 	@echo "  version      - Print the version from VERSION"
-	@echo "  clean        - Remove build artifacts"
+	@echo "  clean        - Remove bin/ and dist/"
 	@echo "  deps         - Install dependencies"
 	@echo "  help         - Show this help message"

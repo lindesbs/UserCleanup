@@ -1,113 +1,115 @@
 # UserCleanup
 
-UserCleanup is a CLI tool for managing user accounts on Debian and Ubuntu systems. It helps system administrators identify and manage user accounts, showing which users exist, which are inactive, and what configurations are associated with each user.
+UserCleanup is a CLI tool for cleaning up user accounts on Debian and Ubuntu
+servers. It shows each user together with everything that belongs to them
+(web server sites, PHP-FPM pools, logrotate, systemd, cron, sudoers and other
+files in `/etc`), finds orphaned or broken entries, creates backups and
+generates the shell commands to remove a user. It never deletes anything
+itself: the administrator reviews and runs the generated commands.
 
 ## Features
 
-- List all users in the home directory
-- Show which users are active and which are "dead"
-- Display configurations in /etc for each user
-- Backup and delete users and their files
+- List users with their Apache, nginx and Caddy sites, PHP-FPM pools,
+  logrotate entries, systemd units, cron jobs and other files in `/etc`
+- Find orphaned or broken entries (homes without a user, pools or sites of
+  deleted users, missing document roots, ...)
+- Show the MySQL/MariaDB databases and tables of a user's `~/.my.cnf` login
+- Back up a user into a checksummed `tar.gz` with a JSON manifest (plus a
+  `mysqldump` if the user has a MySQL login)
+- Generate a reviewable shell script that removes a user and their entries
+- JSON output and filtering by area (`list --only`)
+- Interactive terminal interface (`usercleanup tui`)
 
-## Building
+## Installation
 
-The Makefile builds the application for the current platform and cross-compiles it for Linux and macOS.
+### Debian package (Debian, Ubuntu)
 
-### Prerequisites
-
-- Go 1.24 or later
-- Make
-
-### Using the Makefile
+Download the `.deb` for your architecture (`amd64`, `arm64`, `armhf`,
+`i386`) and `SHA256SUMS` from the
+[GitHub releases](https://github.com/lindesbs/UserCleanup/releases):
 
 ```bash
-# Build for the current platform
-make build
-
-# Build for all Linux and macOS targets
-make release
-
-# Build for all Linux architectures (amd64, 386, arm64, arm)
-make linux
-make linux-amd64   # single architecture, also linux-386, linux-arm64, linux-arm
-
-# Build for macOS (Intel and Apple Silicon)
-make macos
-make darwin-arm64  # single architecture, also darwin-amd64
-
-# The former debian targets still work as aliases for the linux targets
-make debian
-
-# Clean build artifacts
-make clean
-
-# Install dependencies
-make deps
-
-# Show help
-make help
+sha256sum -c --ignore-missing SHA256SUMS
+sudo apt install ./usercleanup_<version>_amd64.deb
+usercleanup --version
 ```
 
-## Versioning and releases
+The package installs `/usr/bin/usercleanup` plus the README and license in
+`/usr/share/doc/usercleanup/`. Remove it with `sudo apt remove usercleanup`;
+backups in `/var/backups/usercleanup` are kept.
 
-The version lives in the `VERSION` file (`MAJOR.MINOR.PATCH`) and is compiled into the binaries, so `UserCleanup --version` shows it. `make dist` builds all platforms and packs them into `dist/` with a `SHA256SUMS` file.
+### Archive (Linux, macOS)
 
-GitHub Actions:
+```bash
+sha256sum -c --ignore-missing SHA256SUMS
+tar -xzf usercleanup-linux-amd64-<version>.tar.gz
+sudo install -m 0755 usercleanup-linux-amd64 /usr/local/bin/usercleanup
+```
 
-- **CI** (`.github/workflows/ci.yml`) runs on every push and pull request: `make lint` (gofmt, go vet), `make test`, `make release` and shellcheck on the shell scripts.
-- **Version bumped** (job in the CI workflow) runs on pull requests into `main` and fails unless `VERSION` is higher than on `main` and no tag `v<VERSION>` exists yet.
-- **Release** (`.github/workflows/release.yml`) runs on every push to `main`: it builds all platforms, tags `v<VERSION>` and publishes a GitHub release with the archives.
+### From source
 
-To release: raise `VERSION` on `develop`, open a pull request from `develop` into `main`, merge it once CI is green.
+Build it (see [Development](#development)) and copy the binary or the
+package to the server:
+
+```bash
+make deb
+scp dist/usercleanup_<version>_amd64.deb user@server:/tmp/
+ssh user@server sudo apt install /tmp/usercleanup_<version>_amd64.deb
+```
 
 ## Usage
 
 UserCleanup never deletes anything. It creates backups and prints the shell
-commands to remove a user; you review them and run them yourself.
+commands to remove a user; you review them and run them yourself. `backup`
+must run as root (except with `--dry-run`); run `list` and `plan` as root
+too, so all files in `/etc` and the homes can be read. The examples assume
+the binary is installed as `usercleanup` in the `PATH`.
 
 ```bash
 # List all users (with -s also system users) with their Apache, nginx and
 # Caddy sites, PHP-FPM pools, logrotate entries and other files in /etc that
 # mention them, followed by orphaned or broken entries
-./UserCleanup list
-./UserCleanup list <username>
-./UserCleanup list --json
+usercleanup list
+usercleanup list <username>
+usercleanup list --json
 
 # Show only some areas (comma separated, also with <username> and --json).
 # Users with nothing in these areas are left out; "list --help" lists all
 # areas: users, sites, apache, nginx, caddy, php, systemd, cron, etc,
 # sudoers, sshd, limits, aliases, logrotate, mysql, dirs, files, unowned,
 # findings
-./UserCleanup list --only users            # accounts only
-./UserCleanup list --only mysql            # MySQL databases and tables
-./UserCleanup list --only apache,php       # Apache sites and PHP-FPM pools
-./UserCleanup list --only findings         # orphaned or broken entries
-./UserCleanup list <username> --only systemd,cron
+usercleanup list --only users            # accounts only
+usercleanup list --only mysql            # MySQL databases and tables
+usercleanup list --only apache,php       # Apache sites and PHP-FPM pools
+usercleanup list --only findings         # orphaned or broken entries
+usercleanup list <username> --only systemd,cron
 
 # Back up a user (run as root). Writes <user>-<time>.tar.gz with owners and
 # permissions preserved, a .manifest.json (incl. passwd/shadow/group entries)
 # and a .sha256 file into /var/backups/usercleanup (mode 0700). If the user
 # has a ~/.my.cnf, a mysqldump of its databases is written next to it
 # (<user>-<time>.mysql.sql.gz, also in the .sha256 file).
-./UserCleanup backup <username>
-./UserCleanup backup <username> --dry-run   # only show what would be saved
+usercleanup backup <username>
+usercleanup backup <username> --dry-run   # only show what would be saved
 
 # Print the commands to remove a user. Requires a backup (the newest one is
 # used unless --backup is given). System and service users are refused.
-./UserCleanup plan <username>
-./UserCleanup plan <username> -o remove-<username>.sh   # write to a file
+usercleanup plan <username>
+usercleanup plan <username> -o remove-<username>.sh   # write to a file
 sh remove-<username>.sh                                 # after reviewing it
 
 # Interactive interface: browse users and their areas (tabs: sites, PHP,
 # MySQL, systemd/cron, /etc, logrotate, dirs), see the findings (f), create
 # a backup (b) and show the generated commands (p) or write them to
 # ./remove-<username>.sh (w, never overwrites a file). Nothing is deleted.
-./UserCleanup tui
+usercleanup tui
 
 # Restore a backup
 tar -xzpf /var/backups/usercleanup/<user>-<time>.tar.gz -C /
 
 # Global flags
+--version           # Print the version
+--help, -h          # Help for usercleanup or a command
 --backup-dir, -b    # Absolute backup directory (default /var/backups/usercleanup),
                     # must not be inside a user's home
 --system-users, -s  # Include system users (UID < 1000) in list
@@ -183,58 +185,131 @@ with that name would inherit them), lingering for missing users,
    exactly `/home/<user>` and not shared with another user, and remove the
    directories outside the home owned by the user.
 
-## Testing on Debian
+## Development
 
-The project includes a Docker-based testing environment to verify that the cross-compiled binaries work correctly on Debian systems.
+### Prerequisites
 
-### Using the Test Script
+- Go 1.24 or later
+- Make
+- Docker (only for `test/test-debian.sh`)
 
-```bash
-# Make the script executable
-chmod +x test-debian.sh
+`make deb` runs [nfpm](https://nfpm.goreleaser.com) via `go run`, so nothing
+else needs to be installed; nfpm needs Go 1.26, which Go downloads
+automatically if the installed version is older.
 
-# Run the test script
-./test-debian.sh
+### Project layout
+
+```
+cmd/usercleanup/       entry point (package main), holds the version variable
+internal/usercleanup/  application code and its unit tests (*_test.go)
+test/                  test scripts outside of go test
+  test-debian.sh       builds the Linux binary and opens a Debian container
+  Dockerfile           Debian image used by test-debian.sh
+  testenv/             sets up a disposable test server (see test/testenv/README.md)
+packaging/nfpm.yaml    Debian package definition (name, maintainer, files)
+.github/               CI and release workflows, version check script
+bin/                   compiled binaries (generated, not in git)
+dist/                  release archives and .deb packages (generated, not in git)
+VERSION                release version, compiled into the binary
 ```
 
-This script will:
-1. Cross-compile the UserCleanup binary for Debian (amd64)
-2. Build a Docker image with a Debian environment
-3. Run a Docker container with the binary mounted
-4. Provide a shell where you can test the binary
+Source code, tests and build output are kept apart: code lives in `cmd/`
+and `internal/`, test scripts in `test/`, everything the build produces in
+`bin/` and `dist/`. The unit tests stay next to the code they test because
+Go requires that for tests using package internals.
 
-### Manual Testing with Docker
-
-You can also manually test the binary using Docker:
+### Make targets
 
 ```bash
-# Build the binary
-GOOS=linux GOARCH=amd64 go build -o UserCleanup-linux-amd64
+make build         # current platform -> bin/usercleanup (default target)
+make release       # all Linux and macOS targets -> bin/
+make linux         # Linux amd64, 386, arm64, arm
+make linux-amd64   # single architecture, also linux-386, linux-arm64, linux-arm
+make macos         # macOS amd64 and arm64
+make darwin-arm64  # single architecture, also darwin-amd64
+make debian        # alias for linux, builds binaries only (also debian-amd64, ...)
+make deb           # Debian packages for all Linux architectures -> dist/
+make dist          # release + tar.gz archives, .deb packages and SHA256SUMS -> dist/
+make lint          # gofmt check and go vet
+make test          # unit tests (go test ./...)
+make version       # print the version from VERSION
+make clean         # remove bin/ and dist/
+make deps          # go mod download and go mod tidy
+make help          # list all targets
+```
 
-# Build the Docker image
-docker build -t usercleanup-debian-test .
+Plain `go build ./cmd/usercleanup` also works; the binary then reports the
+version `dev`.
 
-# Run the Docker container with the binary mounted
+## Versioning and releases
+
+The version lives in the `VERSION` file (`MAJOR.MINOR.PATCH`) and is compiled
+into the binaries via `-ldflags "-X main.version=..."`, so
+`usercleanup --version` shows it, and is used as the Debian package version.
+`make dist` builds all platforms and puts into `dist/`:
+
+- `usercleanup-<os>-<arch>-<version>.tar.gz` for Linux (amd64, 386, arm64, arm) and macOS (amd64, arm64)
+- `usercleanup_<version>_<arch>.deb` for Debian/Ubuntu (amd64, i386, arm64, armhf)
+- `SHA256SUMS` over all of them
+
+The Linux arm binary is built for ARMv7 (`GOARM=7`), matching Debian `armhf`.
+
+GitHub Actions:
+
+- **CI** (`.github/workflows/ci.yml`) runs on every push and pull request: `make lint` (gofmt, go vet), `make test`, `make release`, `make deb` (installs and removes the amd64 package on the runner) and shellcheck on the shell scripts in `test/` and `.github/scripts/`.
+- **Version bumped** (job in the CI workflow) runs on pull requests into `main` and fails unless `VERSION` is higher than on `main` and no tag `v<VERSION>` exists yet.
+- **Release** (`.github/workflows/release.yml`) runs on every push to `main`: it builds all platforms, tags `v<VERSION>` and publishes a GitHub release with the archives and Debian packages from `dist/`.
+
+To release: raise `VERSION` on `develop`, open a pull request from `develop` into `main`, merge it once CI is green.
+
+## Testing
+
+### Unit tests
+
+```bash
+make test
+```
+
+The tests in `internal/usercleanup/*_test.go` point all system paths
+(`/home`, `/etc`, ...) into a temporary directory, so they need neither root
+nor a Debian system.
+
+### Debian container
+
+```bash
+./test/test-debian.sh
+```
+
+The script can be called from any directory. It:
+
+1. Cross-compiles `bin/usercleanup-linux-amd64` (`make linux-amd64`)
+2. Builds a Debian image from `test/Dockerfile`
+3. Starts a container with the binary mounted at `/app/usercleanup`
+4. Opens a shell in which you can run `/app/usercleanup --help`
+
+The same by hand:
+
+```bash
+make linux-amd64
+docker build -t usercleanup-debian-test -f test/Dockerfile test
 docker run --rm -it \
-    -v "$(pwd)/UserCleanup-linux-amd64:/app/UserCleanup" \
+    -v "$(pwd)/bin/usercleanup-linux-amd64:/app/usercleanup" \
     usercleanup-debian-test
 ```
 
-## Transferring to Debian Systems
+### Test server
 
-After building the appropriate binary for your target Debian system, transfer it using scp or another file transfer method:
-
-```bash
-# Example: Transfer to a Debian server
-scp UserCleanup-linux-amd64 user@debian-server:/path/to/destination/UserCleanup
-```
-
-Make sure to set the executable permission on the target system:
+`test/testenv/testenv.sh` sets up users, sites, PHP-FPM pools, cron, sudoers
+and systemd units with deliberate problem cases on a **disposable** Debian or
+Ubuntu server and removes them again. See
+[test/testenv/README.md](test/testenv/README.md).
 
 ```bash
-chmod +x /path/to/destination/UserCleanup
+sudo ./test/testenv/testenv.sh setup
+usercleanup list
+sudo ./test/testenv/testenv.sh teardown
 ```
 
 ## License
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+UserCleanup is licensed under the MIT License, see [LICENSE](LICENSE).

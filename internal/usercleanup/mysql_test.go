@@ -1,4 +1,4 @@
-package main
+package usercleanup
 
 import (
 	"compress/gzip"

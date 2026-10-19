@@ -29,8 +29,20 @@ jobs:
       - name: Build all platforms
         run: make release
 
+      - name: Build Debian packages
+        run: make deb
+
+      - name: Check Debian package
+        run: |
+          deb=$(ls dist/usercleanup_*_amd64.deb)
+          dpkg-deb --info "$deb"
+          dpkg-deb --contents "$deb"
+          sudo dpkg -i "$deb"
+          usercleanup --version
+          sudo dpkg -r usercleanup
+
       - name: Shellcheck
-        run: shellcheck test-debian.sh testenv/testenv.sh .github/scripts/*.sh
+        run: shellcheck test/test-debian.sh test/testenv/testenv.sh .github/scripts/*.sh
 
   version:
     name: Version bumped

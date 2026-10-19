@@ -6,12 +6,12 @@ Apache- und Caddy-Seiten, PHP-FPM-Pools, logrotate, Cron, sudoers und eine
 systemd-Unit, dazu bewusst eingebaute Problemfälle.
 
 ```bash
-sudo ./testenv/testenv.sh setup                 # Pakete installieren und alles anlegen
-sudo ./testenv/testenv.sh setup --no-install    # nur Configs/Nutzer, keine Pakete
-sudo ./testenv/testenv.sh setup --with-broken-pool   # zusätzlich defekter PHP-Pool
-sudo ./testenv/testenv.sh setup --caddy-port 8088    # Caddy auf anderem Port (Standard 8080)
-sudo ./testenv/testenv.sh status                # Übersicht
-sudo ./testenv/testenv.sh teardown              # alles wieder entfernen
+sudo ./test/testenv/testenv.sh setup                 # Pakete installieren und alles anlegen
+sudo ./test/testenv/testenv.sh setup --no-install    # nur Configs/Nutzer, keine Pakete
+sudo ./test/testenv/testenv.sh setup --with-broken-pool   # zusätzlich defekter PHP-Pool
+sudo ./test/testenv/testenv.sh setup --caddy-port 8088    # Caddy auf anderem Port (Standard 8080)
+sudo ./test/testenv/testenv.sh status                # Übersicht
+sudo ./test/testenv/testenv.sh teardown              # alles wieder entfernen
 ```
 
 Das Skript ist idempotent, `setup` kann also mehrfach laufen. Ist der Caddy-Port
