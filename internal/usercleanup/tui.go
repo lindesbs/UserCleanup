@@ -1,4 +1,4 @@
-package main
+package usercleanup
 
 import (
 	"bytes"
@@ -450,7 +450,7 @@ func (m tuiModel) userSummary(user *User) string {
 
 func (m tuiModel) View() string {
 	var b strings.Builder
-	header := tuiTitle.Render("UserCleanup " + version)
+	header := tuiTitle.Render("UserCleanup " + appVersion)
 	switch m.screen {
 	case screenLoading:
 		return header + "\n\nCollecting users, sites, pools, databases and /etc entries...\n"

@@ -1,5 +1,6 @@
-UserCleanup
-UserCleanup-linux-*
+# Build output
+/bin/
+/dist/
+
+# Local backups
 backups/
-UserCleanup-darwin-*
-dist/

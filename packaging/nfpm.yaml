@@ -1,0 +1,32 @@
+# Debian package definition for nfpm (https://nfpm.goreleaser.com).
+# Used by "make deb": VERSION and DEB_ARCH come from the Makefile, which
+# also copies the binary of each architecture to bin/deb/usercleanup.
+name: usercleanup
+version: ${VERSION}
+arch: ${DEB_ARCH}
+platform: linux
+section: admin
+priority: optional
+maintainer: Stefan Lindecke <github.com@lindesbs.de>
+homepage: https://github.com/lindesbs/UserCleanup
+license: MIT
+description: |
+  Find and clean up user accounts on Debian and Ubuntu servers
+  UserCleanup lists users with their Apache, nginx and Caddy sites,
+  PHP-FPM pools, logrotate entries, systemd units, cron jobs and other
+  files in /etc, finds orphaned entries, creates backups and generates
+  the shell commands to remove a user. It never deletes anything itself.
+
+contents:
+  - src: bin/deb/usercleanup
+    dst: /usr/bin/usercleanup
+    file_info:
+      mode: 0755
+  - src: LICENSE
+    dst: /usr/share/doc/usercleanup/copyright
+    file_info:
+      mode: 0644
+  - src: README.md
+    dst: /usr/share/doc/usercleanup/README.md
+    file_info:
+      mode: 0644
