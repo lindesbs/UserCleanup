@@ -18,6 +18,7 @@ type Inventory struct {
 	Logrotate []*LogrotateEntry `json:"logrotate"`
 	Units     []*Unit           `json:"units"`
 	Refs      []*Reference      `json:"references"`
+	MySQL     []*MySQLAccount   `json:"mysql"`
 	Findings  []Finding         `json:"findings"`
 	refFiles  map[string]*refFile
 	// fileOwners maps each parsed config file to the owners of its blocks;
@@ -40,6 +41,7 @@ type UserData struct {
 	Logrotate []*LogrotateEntry `json:"logrotate"`
 	Units     []*Unit           `json:"units"`
 	Refs      []*Reference      `json:"references"`
+	MySQL     []*MySQLAccount   `json:"mysql"`
 	// UserUnits are systemd user units in the home; Linger means they
 	// keep running without a login
 	UserUnits []string `json:"user_units,omitempty"`
@@ -90,6 +92,7 @@ func collectInventory(all map[string]*User) *Inventory {
 		Pools:      collectPools(),
 		Logrotate:  collectLogrotate(),
 		Units:      collectUnits(),
+		MySQL:      collectMySQL(all),
 		fileOwners: make(map[string]map[string]bool),
 		refFiles:   make(map[string]*refFile),
 	}
@@ -274,6 +277,11 @@ func (inv *Inventory) For(username string) UserData {
 	for _, ref := range inv.Refs {
 		if contains(ref.Owners, username) {
 			data.Refs = append(data.Refs, ref)
+		}
+	}
+	for _, acct := range inv.MySQL {
+		if acct.Owner == username {
+			data.MySQL = append(data.MySQL, acct)
 		}
 	}
 	if user := inv.All[username]; user != nil {
@@ -563,6 +571,15 @@ func (inv *Inventory) findOrphans() {
 				add("ref_user_missing", ref.File, ref.Line, "%s entry for missing user %s (a new user with that name would inherit it): %s",
 					ref.Kind, name, ref.Text)
 			}
+		}
+	}
+
+	for _, acct := range inv.MySQL {
+		if acct.Error != "" {
+			add("mysql_unreachable", acct.File, 0, "MySQL login of %s (%s) failed: %s", acct.Owner, acct.Label(), acct.Error)
+		}
+		if info, err := os.Stat(acct.File); err == nil && info.Mode().Perm()&0004 != 0 {
+			add("mysql_cnf_readable", acct.File, 0, "readable by everyone, it holds the MySQL password of %s", acct.Owner)
 		}
 	}
 

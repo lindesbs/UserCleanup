@@ -14,7 +14,7 @@ func TestParseListFilter(t *testing.T) {
 	if !f["users"] || !f["apache"] || !f["php"] || len(f) != 3 {
 		t.Errorf("got %v", f)
 	}
-	if _, err := parseListFilter([]string{"apache,mysql"}); err == nil || !strings.Contains(err.Error(), "mysql") {
+	if _, err := parseListFilter([]string{"apache,postgres"}); err == nil || !strings.Contains(err.Error(), "postgres") {
 		t.Errorf("unknown area not rejected: %v", err)
 	}
 	if f, _ := parseListFilter(nil); !f.has("findings") || !f.site("nginx") {

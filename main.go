@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"sort"
@@ -41,7 +42,7 @@ func lines(file string, line, endLine int) string {
 
 // printUserInfo prints the areas of a user that the filter selects; data
 // is the unfiltered data of the user
-func printUserInfo(user *User, all UserData, f listFilter) {
+func printUserInfo(w io.Writer, user *User, all UserData, f listFilter) {
 	data := f.apply(all)
 	userType := "User"
 	if user.IsSystemUser {
@@ -50,166 +51,204 @@ func printUserInfo(user *User, all UserData, f listFilter) {
 	bold := color.New(color.Bold)
 
 	if !f.has("users") {
-		bold.Printf("Username: %s\n", user.Username)
+		bold.Fprintf(w, "Username: %s\n", user.Username)
 	} else {
-		bold.Printf("Username: %s (%s)\n", user.Username, userType)
-		fmt.Printf("UID/GID: %d/%d\n", user.UID, user.GID)
-		fmt.Printf("Home Directory: %s", user.HomeDir)
+		bold.Fprintf(w, "Username: %s (%s)\n", user.Username, userType)
+		fmt.Fprintf(w, "UID/GID: %d/%d\n", user.UID, user.GID)
+		fmt.Fprintf(w, "Home Directory: %s", user.HomeDir)
 		if !exists(user.HomeDir) {
-			color.New(color.FgYellow).Print(" (missing)")
+			color.New(color.FgYellow).Fprint(w, " (missing)")
 		}
-		fmt.Println()
-		fmt.Printf("Shell: %s\n", user.Shell)
-		fmt.Printf("Login: ")
+		fmt.Fprintln(w)
+		fmt.Fprintf(w, "Shell: %s\n", user.Shell)
+		fmt.Fprintf(w, "Login: ")
 		if user.HasLogin {
-			color.New(color.FgGreen).Println("yes")
+			color.New(color.FgGreen).Fprintln(w, "yes")
 		} else {
-			color.New(color.FgYellow).Println("no")
+			color.New(color.FgYellow).Fprintln(w, "no")
 		}
 		if reason := isProtected(user); reason != "" {
-			color.New(color.FgRed).Printf("Protected: %s\n", reason)
+			color.New(color.FgRed).Fprintf(w, "Protected: %s\n", reason)
 		}
 	}
 
 	if len(data.Sites) > 0 {
-		fmt.Println("Sites:")
+		fmt.Fprintln(w, "Sites:")
 		for _, site := range data.Sites {
 			state := "enabled"
 			if !site.Enabled {
 				state = "disabled"
 			}
-			fmt.Printf("  - %s (%s)\n", siteLabel(site), state)
+			fmt.Fprintf(w, "  - %s (%s)\n", siteLabel(site), state)
 			if site.Root != "" {
-				fmt.Printf("      root: %s\n", site.Root)
+				fmt.Fprintf(w, "      root: %s\n", site.Root)
 			}
 			for _, backend := range site.Backends {
-				fmt.Printf("      php: %s\n", backend)
+				fmt.Fprintf(w, "      php: %s\n", backend)
 			}
 			if len(site.Owners) > 1 {
-				fmt.Printf("      shared with: %s\n", strings.Join(site.Owners, ", "))
+				fmt.Fprintf(w, "      shared with: %s\n", strings.Join(site.Owners, ", "))
 			}
-			fmt.Printf("      file: %s\n", lines(site.File, site.Line, site.EndLine))
+			fmt.Fprintf(w, "      file: %s\n", lines(site.File, site.Line, site.EndLine))
 		}
 	}
 	if len(data.Pools) > 0 {
-		fmt.Println("PHP-FPM pools:")
+		fmt.Fprintln(w, "PHP-FPM pools:")
 		for _, pool := range data.Pools {
-			fmt.Printf("  - [%s] PHP %s, user %s, listen %s\n", pool.Name, pool.Version, pool.User, pool.Listen)
+			fmt.Fprintf(w, "  - [%s] PHP %s, user %s, listen %s\n", pool.Name, pool.Version, pool.User, pool.Listen)
 			keys := make([]string, 0, len(pool.Settings))
 			for key := range pool.Settings {
 				keys = append(keys, key)
 			}
 			sort.Strings(keys)
 			for _, key := range keys {
-				fmt.Printf("      %s = %s\n", key, pool.Settings[key])
+				fmt.Fprintf(w, "      %s = %s\n", key, pool.Settings[key])
 			}
 			for _, site := range pool.UsedBy {
-				color.New(color.FgYellow).Printf("      also used by: %s\n", site)
+				color.New(color.FgYellow).Fprintf(w, "      also used by: %s\n", site)
 			}
-			fmt.Printf("      file: %s\n", lines(pool.File, pool.Line, pool.EndLine))
+			fmt.Fprintf(w, "      file: %s\n", lines(pool.File, pool.Line, pool.EndLine))
 		}
 	}
 	if len(data.Units) > 0 {
 		for _, unit := range data.Units {
 			if unit.Enabled {
-				color.New(color.FgYellow).Println("Runs enabled services: check before removing this user")
+				color.New(color.FgYellow).Fprintln(w, "Runs enabled services: check before removing this user")
 				break
 			}
 		}
-		fmt.Println("systemd units:")
+		fmt.Fprintln(w, "systemd units:")
 		for _, unit := range data.Units {
 			state := "disabled"
 			if unit.Enabled {
 				state = "enabled"
 			}
-			fmt.Printf("  - %s (%s)\n      file: %s\n", unit.Name, state, unit.File)
+			fmt.Fprintf(w, "  - %s (%s)\n      file: %s\n", unit.Name, state, unit.File)
 			if unit.User != user.Username {
 				runsAs := unit.User
 				if runsAs == "" {
 					runsAs = "root"
 				}
-				fmt.Printf("      runs as %s but uses: %s\n", runsAs, strings.Join(unit.HomePaths(user), ", "))
+				fmt.Fprintf(w, "      runs as %s but uses: %s\n", runsAs, strings.Join(unit.HomePaths(user), ", "))
 			}
 			if unit.Timer != "" {
-				fmt.Printf("      timer: %s\n", unit.Timer)
+				fmt.Fprintf(w, "      timer: %s\n", unit.Timer)
 			}
 		}
 	}
 	if crontab := filepath.Join(cronDir, user.Username); f.crontab() && exists(crontab) {
-		fmt.Printf("Crontab: %s\n", crontab)
+		fmt.Fprintf(w, "Crontab: %s\n", crontab)
 	}
 	if len(data.UserUnits) > 0 || data.Linger {
-		fmt.Printf("systemd user services: %d", len(data.UserUnits))
+		fmt.Fprintf(w, "systemd user services: %d", len(data.UserUnits))
 		if data.Linger {
-			fmt.Print(" (linger enabled: they run without login)")
+			fmt.Fprint(w, " (linger enabled: they run without login)")
 		}
-		fmt.Println()
+		fmt.Fprintln(w)
 		for _, unit := range data.UserUnits {
-			fmt.Printf("  - %s\n", unit)
+			fmt.Fprintf(w, "  - %s\n", unit)
 		}
 	}
+	printMySQL(w, data.MySQL)
 	if len(data.Refs) > 0 {
-		fmt.Println("Entries in /etc:")
+		fmt.Fprintln(w, "Entries in /etc:")
 		for _, ref := range data.Refs {
-			fmt.Printf("  - %s %s:%d\n      %s\n", ref.Kind, ref.File, ref.Line, ref.Text)
+			fmt.Fprintf(w, "  - %s %s:%d\n      %s\n", ref.Kind, ref.File, ref.Line, ref.Text)
 		}
 	}
 	if len(data.Dirs) > 0 {
-		fmt.Println("Directories outside the home:")
+		fmt.Fprintln(w, "Directories outside the home:")
 		for _, dir := range data.Dirs {
-			fmt.Printf("  - %s\n", dir)
+			fmt.Fprintf(w, "  - %s\n", dir)
 		}
 	}
 	if len(data.Logrotate) > 0 {
-		fmt.Println("Logrotate:")
+		fmt.Fprintln(w, "Logrotate:")
 		for _, entry := range data.Logrotate {
-			fmt.Printf("  - %s\n", strings.Join(entry.Paths, " "))
-			fmt.Printf("      file: %s\n", lines(entry.File, entry.Line, entry.EndLine))
+			fmt.Fprintf(w, "  - %s\n", strings.Join(entry.Paths, " "))
+			fmt.Fprintf(w, "      file: %s\n", lines(entry.File, entry.Line, entry.EndLine))
 		}
 	}
 
 	if others := otherConfigs(user, all); f.has("files") && len(others) > 0 {
-		fmt.Println("Other files in /etc that mention the user:")
+		fmt.Fprintln(w, "Other files in /etc that mention the user:")
 		for _, config := range others {
-			fmt.Printf("  - %s\n", config)
+			fmt.Fprintf(w, "  - %s\n", config)
 		}
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
+}
+
+// printMySQL prints the databases and tables of the user's MySQL logins
+func printMySQL(w io.Writer, accounts []*MySQLAccount) {
+	if len(accounts) == 0 {
+		return
+	}
+	fmt.Fprintln(w, "MySQL:")
+	for _, acct := range accounts {
+		fmt.Fprintf(w, "  - %s: %s", acct.File, acct.Label())
+		if acct.Server != "" {
+			fmt.Fprintf(w, " (server %s)", acct.Server)
+		}
+		fmt.Fprintln(w)
+		if acct.Database != "" {
+			fmt.Fprintf(w, "      default database: %s\n", acct.Database)
+		}
+		if acct.Error != "" {
+			color.New(color.FgYellow).Fprintf(w, "      not checked: %s\n", acct.Error)
+			continue
+		}
+		if acct.Global {
+			color.New(color.FgYellow).Fprintln(w, "      account has privileges on all databases; they are not assigned to this user")
+		}
+		if len(acct.Databases) == 0 {
+			fmt.Fprintln(w, "      no databases")
+		}
+		for _, db := range acct.Databases {
+			fmt.Fprintf(w, "      database %s: %d tables, %s, ~%d rows\n", db.Name, len(db.Tables), formatBytes(db.Size()), db.Rows())
+			if len(db.SharedWith) > 0 {
+				color.New(color.FgYellow).Fprintf(w, "        also used by: %s\n", strings.Join(db.SharedWith, ", "))
+			}
+			for _, table := range db.Tables {
+				fmt.Fprintf(w, "        - %s (%s, ~%d rows, %s)\n", table.Name, table.Engine, table.Rows, formatBytes(table.Size))
+			}
+		}
+	}
 }
 
 // printUnownedSites prints sites that could not be assigned to a user
-func printUnownedSites(sites []*Site) {
+func printUnownedSites(w io.Writer, sites []*Site) {
 	if len(sites) == 0 {
 		return
 	}
-	color.New(color.Bold).Printf("Sites without a known owner (%d):\n", len(sites))
+	color.New(color.Bold).Fprintf(w, "Sites without a known owner (%d):\n", len(sites))
 	for _, site := range sites {
 		state := "enabled"
 		if !site.Enabled {
 			state = "disabled"
 		}
-		fmt.Printf("  - %s (%s)\n", siteLabel(site), state)
+		fmt.Fprintf(w, "  - %s (%s)\n", siteLabel(site), state)
 		if site.Root != "" {
-			fmt.Printf("      root: %s\n", site.Root)
+			fmt.Fprintf(w, "      root: %s\n", site.Root)
 		}
-		fmt.Printf("      file: %s\n", lines(site.File, site.Line, site.EndLine))
+		fmt.Fprintf(w, "      file: %s\n", lines(site.File, site.Line, site.EndLine))
 	}
-	fmt.Println()
+	fmt.Fprintln(w)
 }
 
 // printFindings prints orphaned and broken entries
-func printFindings(findings []Finding) {
+func printFindings(w io.Writer, findings []Finding) {
 	if len(findings) == 0 {
-		color.New(color.FgGreen).Println("No orphaned or broken entries found")
+		color.New(color.FgGreen).Fprintln(w, "No orphaned or broken entries found")
 		return
 	}
-	color.New(color.FgRed, color.Bold).Printf("Orphaned or broken entries (%d):\n", len(findings))
+	color.New(color.FgRed, color.Bold).Fprintf(w, "Orphaned or broken entries (%d):\n", len(findings))
 	for _, f := range findings {
 		location := f.Path
 		if f.Line > 0 {
 			location = fmt.Sprintf("%s:%d", f.Path, f.Line)
 		}
-		fmt.Printf("  - [%s] %s\n      %s\n", f.Kind, location, f.Detail)
+		fmt.Fprintf(w, "  - [%s] %s\n      %s\n", f.Kind, location, f.Detail)
 	}
 }
 
@@ -229,14 +268,20 @@ func loadUser(username string) (*User, *Inventory) {
 		fmt.Fprintf(os.Stderr, "Error finding user configurations: %v\n", err)
 	}
 	inv := collectInventory(users)
-	// Parsed files belong into the backup even if the text search missed them
-	data := inv.For(username)
+	prepareUser(user, inv)
+	return user, inv
+}
+
+// prepareUser adds what the inventory found to the user's backup sources.
+// Parsed files belong into the backup even if the text search missed them.
+func prepareUser(user *User, inv *Inventory) {
+	data := inv.For(user.Username)
 	for _, file := range data.Files() {
 		user.Configs = appendUnique(user.Configs, file)
 	}
 	user.Extra = data.Dirs
+	user.MySQL = data.MySQL
 	sort.Strings(user.Configs)
-	return user, inv
 }
 
 func fail(format string, args ...any) {
@@ -249,8 +294,8 @@ func main() {
 		Use:   "usercleanup",
 		Short: "UserCleanup is a tool to manage and clean up user accounts",
 		Long: `UserCleanup helps system administrators identify and manage user accounts.
-It shows users with their Apache, nginx and Caddy sites, PHP-FPM pools and
-logrotate entries, finds orphaned entries, creates backups, and generates
+It shows users with their Apache, nginx and Caddy sites, PHP-FPM pools,
+logrotate entries and MySQL databases (from ~/.my.cnf), finds orphaned entries, creates backups, and generates
 the shell commands to remove a user. It never deletes anything itself: the
 administrator reviews and runs the generated commands.`,
 		Version: version,
@@ -275,6 +320,7 @@ are left out unless a username is given. Areas:
 			if err != nil {
 				fail("Error reading passwd file: %v", err)
 			}
+			skipMySQL = !filter.has("mysql") && !filter.has("findings")
 			inv := collectInventory(all)
 
 			users := make(map[string]*User)
@@ -342,13 +388,13 @@ are left out unless a username is given. Areas:
 				fmt.Printf("Found %d users\n\n", len(shown))
 			}
 			for _, user := range shown {
-				printUserInfo(user, inv.For(user.Username), filter)
+				printUserInfo(os.Stdout, user, inv.For(user.Username), filter)
 			}
 			if showUnowned {
-				printUnownedSites(unowned)
+				printUnownedSites(os.Stdout, unowned)
 			}
 			if showFindings {
-				printFindings(inv.Findings)
+				printFindings(os.Stdout, inv.Findings)
 			}
 		},
 	}
@@ -387,28 +433,7 @@ unless --backup is given. System and service users are refused.`,
 				fail("Refusing to generate delete commands: %s", reason)
 			}
 
-			archive := planBackup
-			if archive != "" {
-				var err error
-				if archive, err = filepath.Abs(archive); err != nil {
-					fail("Error resolving %s: %v", planBackup, err)
-				}
-			} else {
-				var err error
-				if archive, err = latestBackup(user.Username, backupDir); err != nil {
-					fail("Error looking for backups: %v", err)
-				}
-				if archive == "" {
-					fail("No backup of %s found in %s. Run \"usercleanup backup %s\" first.",
-						user.Username, backupDir, user.Username)
-				}
-			}
-			manifest, err := readManifest(archive)
-			if err != nil {
-				fail("Error reading manifest of %s: %v", archive, err)
-			}
-
-			script, err := buildDeletePlan(user, inv, archive, manifest)
+			script, _, err := planForUser(user, inv, planBackup)
 			if err != nil {
 				fail("%v", err)
 			}
@@ -438,6 +463,21 @@ unless --backup is given. System and service users are refused.`,
 	rootCmd.AddCommand(listCmd)
 	rootCmd.AddCommand(backupCmd)
 	rootCmd.AddCommand(planCmd)
+	rootCmd.AddCommand(&cobra.Command{
+		Use:     "tui",
+		Aliases: []string{"ui"},
+		Short:   "Browse users interactively, create backups and generate the commands",
+		Long: `Starts an interactive terminal interface: all users with their sites,
+pools, databases, units and /etc entries, the findings, backups (b) and the
+generated commands (p), which can be written to a file (w). Like the other
+commands it never deletes anything.`,
+		Args: cobra.NoArgs,
+		Run: func(cmd *cobra.Command, args []string) {
+			if err := runTUI(); err != nil {
+				fail("%v", err)
+			}
+		},
+	})
 
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
